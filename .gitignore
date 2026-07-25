@@ -1,0 +1,12 @@
+# Ignore Node modules for the frontend
+node_modules/
+dist/
+
+# Ignore Go binaries
+backend/tierlist-backend
+
+# Ignore environment variables (where real passwords will go later)
+.env
+
+# Ignore Mac system files
+.DS_Store

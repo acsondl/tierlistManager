@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: tierlist_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: tieradmin
+      POSTGRES_PASSWORD: YOURPASSWORD
+      POSTGRES_DB: tierlistdb
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
