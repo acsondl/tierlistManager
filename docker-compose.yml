@@ -7,7 +7,7 @@ services:
     restart: always
     environment:
       POSTGRES_USER: tieradmin
-      POSTGRES_PASSWORD: YOURPASSWORD
+      POSTGRES_PASSWORD: yourpassword
       POSTGRES_DB: tierlistdb
     ports:
       - "127.0.0.1:5433:5432"
