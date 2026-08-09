@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { DndContext, pointerWithin, DragOverlay, PointerSensor, useSensor, useSensors, TouchSensor, useDroppable } from '@dnd-kit/core';
 import { SortableContext, rectSortingStrategy, useSortable, arrayMove } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
+import { toBlob } from 'html-to-image'; // NEW: The modern screenshot library!
 import '../index.css';
 
 // REPLACE THESE WITH YOUR ACTUAL TAILSCALE IP
@@ -13,23 +14,30 @@ const LISTS_API = `${API_BASE}/lists`;
 
 const COLORS = ["bg-red-500", "bg-orange-500", "bg-yellow-500", "bg-green-500", "bg-blue-500", "bg-purple-500", "bg-pink-500", "bg-gray-400"];
 
-function SortableItem({ id, label, image }: { id: string, label: string, image?: string }) {
+function SortableItem({ id, label, image, onPreview }: { id: string, label: string, image?: string, onPreview?: () => void }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
   const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.4 : 1 };
   
   return (
-    <div ref={setNodeRef} style={style} {...listeners} {...attributes} className="w-16 h-16 md:w-20 md:h-20 touch-none bg-gray-700 flex items-center justify-center text-center font-bold text-xs md:text-sm shadow-sm cursor-grab active:cursor-grabbing hover:opacity-80 z-50 relative overflow-hidden shrink-0">
+    <div 
+      ref={setNodeRef} 
+      style={style} 
+      {...listeners} 
+      {...attributes} 
+      onDoubleClick={onPreview} 
+      className="w-16 h-16 md:w-20 md:h-20 touch-none bg-gray-700 flex items-center justify-center text-center font-bold text-xs md:text-sm shadow-sm cursor-grab active:cursor-grabbing hover:opacity-80 z-50 relative overflow-hidden shrink-0"
+    >
       {image ? <img src={image} alt={label} className="w-full h-full object-cover pointer-events-none" /> : <span className="p-1 break-words">{label}</span>}
     </div>
   );
 }
 
-function SortableZone({ id, items, className }: { id: string, items: any[], className: string }) {
+function SortableZone({ id, items, className, onPreview }: { id: string, items: any[], className: string, onPreview: (item: any) => void }) {
   const { setNodeRef } = useDroppable({ id }); 
   return (
     <SortableContext id={id} items={items.map(i => i.id)} strategy={rectSortingStrategy}>
       <div ref={setNodeRef} className={className}>
-        {items.map(item => <SortableItem key={item.id} id={item.id} label={item.label} image={item.image} />)}
+        {items.map(item => <SortableItem key={item.id} id={item.id} label={item.label} image={item.image} onPreview={() => onPreview(item)} />)}
       </div>
     </SortableContext>
   );
@@ -62,6 +70,9 @@ export default function Editor() {
   const [editTierColor, setEditTierColor] = useState("");
   const [savingCount, setSavingCount] = useState(0);
 
+  const [previewItem, setPreviewItem] = useState<{ label: string, image: string } | null>(null);
+  const captureRef = useRef<HTMLDivElement>(null);
+
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
     useSensor(TouchSensor, { activationConstraint: { distance: 5 } }) 
@@ -80,21 +91,48 @@ export default function Editor() {
 
   useEffect(() => {
     if (!listId) return;
-    // Fetch List Metadata (Title and Notes)
-    fetch(`${LISTS_API}/single?id=${listId}`)
-      .then(res => res.json())
-      .then(data => {
-        if (data) {
-          setListData(data);
-          setEditTitle(data.name);
-        }
-      });
-
+    fetch(`${LISTS_API}/single?id=${listId}`).then(res => res.json()).then(data => {
+      if (data) { setListData(data); setEditTitle(data.name); }
+    });
     fetch(`${ITEMS_API}?list_id=${listId}`).then(res => res.json()).then(data => setItems(data || []));
     fetch(`${TIERS_API}?list_id=${listId}`).then(res => res.json()).then(data => setTiers(data || []));
   }, [listId]);
 
-  // NEW: Save the updated List Title or Notes
+  // FIX: The new, modern html-to-image export logic
+  const handleExportPNG = async () => {
+    if (!captureRef.current) return;
+    setSavingCount(prev => prev + 1); 
+    
+    try {
+      const blob = await toBlob(captureRef.current, {
+        backgroundColor: '#111111', 
+        pixelRatio: 2, 
+        // We tell html-to-image to ignore our edit buttons!
+        filter: (node) => {
+          if (node instanceof HTMLElement) {
+            return !node.hasAttribute('data-html2canvas-ignore');
+          }
+          return true;
+        }
+      });
+      
+      if (!blob) throw new Error("Failed to generate blob.");
+
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${listData.name}-TierList.png`; 
+      link.click();
+      
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Failed to export image", err);
+      alert("Failed to export the image. See browser console for details.");
+    } finally {
+      setSavingCount(prev => prev - 1);
+    }
+  };
+
   const saveListMetadata = (updatedData: any) => {
     setSavingCount(prev => prev + 1);
     fetch(LISTS_API + "/update", {
@@ -115,10 +153,7 @@ export default function Editor() {
     setListData({ ...listData, notes: e.target.value });
   };
 
-  const handleNotesBlur = () => {
-    // Save to database only when the user clicks away from the text box
-    saveListMetadata(listData);
-  };
+  const handleNotesBlur = () => saveListMetadata(listData);
 
   const saveToDatabase = (newItems: any[]) => {
     setSavingCount(prev => prev + 1); 
@@ -132,11 +167,7 @@ export default function Editor() {
   const handleAddTier = () => {
     const newTier = { id: `tier-${listId}-${Date.now()}`, label: "NEW", color: "bg-gray-400", tier_list_id: Number(listId) };
     setSavingCount(prev => prev + 1);
-    fetch(TIERS_API + "/new", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(newTier)
-    })
+    fetch(TIERS_API + "/new", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(newTier) })
       .then(res => res.json())
       .then(savedTier => setTiers(prev => [...prev, savedTier]))
       .finally(() => setSavingCount(prev => prev - 1));
@@ -164,13 +195,9 @@ export default function Editor() {
 
     const updatedTiers = newTiers.map((t, i) => ({ ...t, order_index: i }));
     setTiers(updatedTiers); 
-    
     setSavingCount(prev => prev + 1);
-    fetch(TIERS_API + "/bulk", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(updatedTiers)
-    }).finally(() => setSavingCount(prev => prev - 1));
+    fetch(TIERS_API + "/bulk", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(updatedTiers) })
+      .finally(() => setSavingCount(prev => prev - 1));
   };
 
   const startEditing = (tier: any) => {
@@ -184,11 +211,8 @@ export default function Editor() {
     setTiers(prev => prev.map(t => t.id === tier.id ? updatedTier : t));
     setEditingTierId(null);
     setSavingCount(prev => prev + 1);
-    fetch(TIERS_API + "/update", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(updatedTier)
-    }).finally(() => setSavingCount(prev => prev - 1));
+    fetch(TIERS_API + "/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(updatedTier) })
+      .finally(() => setSavingCount(prev => prev - 1));
   };
 
   useEffect(() => {
@@ -316,71 +340,80 @@ export default function Editor() {
           <Link to="/" className="text-gray-400 hover:text-gray-200 font-semibold transition-colors flex items-center gap-2">
             ← Back to Menu
           </Link>
-          {savingCount > 0 && <span className="text-yellow-500 font-bold animate-pulse">Saving...</span>}
-        </div>
-
-        {/* FEATURE 1: Editable List Title */}
-        <div className="w-full max-w-4xl mb-6 flex justify-center">
-          {isEditingTitle ? (
-            <div className="flex gap-2 w-full max-w-md">
-              <input 
-                autoFocus
-                type="text" 
-                value={editTitle} 
-                onChange={(e) => setEditTitle(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleSaveTitle()}
-                className="flex-1 bg-gray-800 text-3xl font-bold text-center text-white border-b-2 border-blue-500 focus:outline-none py-1"
-              />
-              <button onClick={handleSaveTitle} className="bg-green-600 hover:bg-green-500 px-4 rounded font-bold">Save</button>
-            </div>
-          ) : (
-            <h1 
-              onClick={() => setIsEditingTitle(true)}
-              className="text-3xl md:text-5xl font-bold text-gray-100 cursor-pointer hover:text-blue-400 transition-colors group flex items-center gap-3"
+          
+          <div className="flex items-center gap-4">
+            {savingCount > 0 && <span className="text-yellow-500 font-bold animate-pulse">Saving...</span>}
+            <button 
+              onClick={handleExportPNG}
+              className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-1 px-4 rounded shadow-lg flex items-center gap-2"
             >
-              {listData.name}
-              <span className="text-xl opacity-0 group-hover:opacity-100 text-gray-500">✏️</span>
-            </h1>
-          )}
+              📸 Export as PNG
+            </button>
+          </div>
         </div>
-        
-        {/* Tier Grid */}
-        <div className="w-full max-w-4xl flex flex-col border-2 border-black bg-[#1a1a1a] mb-6">
-          {tiers.map((tier, index) => (
-            <div key={tier.id} className="flex border-b border-black min-h-[64px] md:min-h-[80px]">
-              
-              {editingTierId === tier.id ? (
-                <div className="w-32 md:w-48 shrink-0 flex flex-col p-2 gap-2 bg-gray-800 border-r border-black z-10 justify-center">
-                  <input autoFocus value={editTierLabel} onChange={(e) => setEditTierLabel(e.target.value)} className="w-full text-black px-1 font-bold rounded" />
-                  <div className="flex flex-wrap gap-1 justify-center">
-                    {COLORS.map(c => (
-                      <button key={c} onClick={() => setEditTierColor(c)} className={`w-4 h-4 md:w-5 md:h-5 rounded-full cursor-pointer border-2 ${editTierColor === c ? 'border-white' : 'border-transparent'} ${c}`} />
-                    ))}
-                  </div>
-                  <div className="flex justify-between gap-1 w-full">
-                     <button onClick={() => moveTier(tier.id, -1)} disabled={index === 0} className="flex-1 bg-gray-700 hover:bg-gray-600 disabled:opacity-30 disabled:cursor-not-allowed text-white text-xs font-bold py-1 rounded">⬆️</button>
-                     <button onClick={() => moveTier(tier.id, 1)} disabled={index === tiers.length - 1} className="flex-1 bg-gray-700 hover:bg-gray-600 disabled:opacity-30 disabled:cursor-not-allowed text-white text-xs font-bold py-1 rounded">⬇️</button>
-                  </div>
-                  <div className="flex justify-between gap-1 w-full">
-                    <button onClick={() => saveTierEdit(tier)} className="flex-1 bg-green-600 hover:bg-green-500 text-white text-xs font-bold py-1 rounded">Save</button>
-                    <button onClick={() => handleDeleteTier(tier.id)} className="bg-red-600 hover:bg-red-500 text-white text-xs font-bold px-2 py-1 rounded" title="Delete Row">🗑️</button>
-                  </div>
-                </div>
-              ) : (
-                <div className={`${tier.color} w-20 md:w-24 shrink-0 flex items-center justify-center text-xl md:text-2xl font-bold text-black border-r border-black relative group`}>
-                  <span className="break-words px-1 text-center leading-tight">{tier.label}</span>
-                  <button onClick={() => startEditing(tier)} className="absolute top-1 right-1 text-xs opacity-0 group-hover:opacity-100 hover:scale-125 transition-all bg-black/30 rounded p-1" title="Edit Tier">
-                    ⚙️
-                  </button>
-                </div>
-              )}
 
-              <SortableZone id={tier.id} items={items.filter(item => item.tier === tier.id)} className="flex-1 p-1 flex flex-wrap content-start gap-1" />
-            </div>
-          ))}
+        <div ref={captureRef} className="w-full max-w-4xl p-2 bg-[#111111]">
+          
+          <div className="w-full mb-6 flex justify-center">
+            {isEditingTitle ? (
+              <div className="flex gap-2 w-full max-w-md">
+                <input 
+                  autoFocus
+                  type="text" 
+                  value={editTitle} 
+                  onChange={(e) => setEditTitle(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleSaveTitle()}
+                  className="flex-1 bg-gray-800 text-3xl font-bold text-center text-white border-b-2 border-blue-500 focus:outline-none py-1"
+                />
+                <button onClick={handleSaveTitle} className="bg-green-600 hover:bg-green-500 px-4 rounded font-bold" data-html2canvas-ignore>Save</button>
+              </div>
+            ) : (
+              <h1 
+                onClick={() => setIsEditingTitle(true)}
+                className="text-3xl md:text-5xl font-bold text-gray-100 cursor-pointer hover:text-blue-400 transition-colors group flex items-center gap-3"
+              >
+                {listData.name}
+                <span className="text-xl opacity-0 group-hover:opacity-100 text-gray-500" data-html2canvas-ignore>✏️</span>
+              </h1>
+            )}
+          </div>
+          
+          <div className="w-full flex flex-col border-2 border-black bg-[#1a1a1a] mb-6">
+            {tiers.map((tier, index) => (
+              <div key={tier.id} className="flex border-b border-black min-h-[64px] md:min-h-[80px]">
+                
+                {editingTierId === tier.id ? (
+                  <div className="w-32 md:w-48 shrink-0 flex flex-col p-2 gap-2 bg-gray-800 border-r border-black z-10 justify-center" data-html2canvas-ignore>
+                    <input autoFocus value={editTierLabel} onChange={(e) => setEditTierLabel(e.target.value)} className="w-full text-black px-1 font-bold rounded" />
+                    <div className="flex flex-wrap gap-1 justify-center">
+                      {COLORS.map(c => (
+                        <button key={c} onClick={() => setEditTierColor(c)} className={`w-4 h-4 md:w-5 md:h-5 rounded-full cursor-pointer border-2 ${editTierColor === c ? 'border-white' : 'border-transparent'} ${c}`} />
+                      ))}
+                    </div>
+                    <div className="flex justify-between gap-1 w-full">
+                       <button onClick={() => moveTier(tier.id, -1)} disabled={index === 0} className="flex-1 bg-gray-700 hover:bg-gray-600 disabled:opacity-30 disabled:cursor-not-allowed text-white text-xs font-bold py-1 rounded">⬆️</button>
+                       <button onClick={() => moveTier(tier.id, 1)} disabled={index === tiers.length - 1} className="flex-1 bg-gray-700 hover:bg-gray-600 disabled:opacity-30 disabled:cursor-not-allowed text-white text-xs font-bold py-1 rounded">⬇️</button>
+                    </div>
+                    <div className="flex justify-between gap-1 w-full">
+                      <button onClick={() => saveTierEdit(tier)} className="flex-1 bg-green-600 hover:bg-green-500 text-white text-xs font-bold py-1 rounded">Save</button>
+                      <button onClick={() => handleDeleteTier(tier.id)} className="bg-red-600 hover:bg-red-500 text-white text-xs font-bold px-2 py-1 rounded" title="Delete Row">🗑️</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className={`${tier.color} w-20 md:w-24 shrink-0 flex items-center justify-center text-xl md:text-2xl font-bold text-black border-r border-black relative group`}>
+                    <span className="break-words px-1 text-center leading-tight">{tier.label}</span>
+                    <button onClick={() => startEditing(tier)} className="absolute top-1 right-1 text-xs opacity-0 group-hover:opacity-100 hover:scale-125 transition-all bg-black/30 rounded p-1" title="Edit Tier" data-html2canvas-ignore>
+                      ⚙️
+                    </button>
+                  </div>
+                )}
+
+                <SortableZone id={tier.id} items={items.filter(item => item.tier === tier.id)} className="flex-1 p-1 flex flex-wrap content-start gap-1" onPreview={setPreviewItem} />
+              </div>
+            ))}
+          </div>
         </div>
         
-        {/* THE CONTROL PANEL: We moved Add Row in here! */}
         <div className="w-full max-w-4xl px-2 md:px-0">
           <div className="mb-6 bg-gray-800 p-4 rounded border border-gray-700 shadow-xl flex flex-col md:flex-row gap-4 justify-between items-center">
             
@@ -389,13 +422,8 @@ export default function Editor() {
               <button type="submit" className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 px-4 rounded shadow">Add Text</button>
             </form>
 
-            {/* FEATURE 4: Moving the Add Row button here as an icon button */}
             <div className="flex gap-4 items-center w-full md:w-auto">
-              <button 
-                onClick={handleAddTier} 
-                className="bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded shadow flex-1 md:flex-none flex items-center justify-center gap-2"
-                title="Add new tier row"
-              >
+              <button onClick={handleAddTier} className="bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded shadow flex-1 md:flex-none flex items-center justify-center gap-2" title="Add new tier row">
                 ➕ Add Row
               </button>
 
@@ -407,24 +435,53 @@ export default function Editor() {
 
           </div>
 
-          <SortableZone id="pool" items={items.filter(item => item.tier === 'pool')} className="bg-[#1a1a1a] border-2 border-black min-h-[150px] p-2 flex flex-wrap content-start gap-1 shadow-xl" />
+          <SortableZone id="pool" items={items.filter(item => item.tier === 'pool')} className="bg-[#1a1a1a] border-2 border-black min-h-[150px] p-2 flex flex-wrap content-start gap-1 shadow-xl" onPreview={setPreviewItem} />
           <TrashZone />
           
-          {/* FEATURE 6: The Notes Area */}
           <div className="mt-8">
             <h3 className="text-xl font-bold mb-2 text-gray-300">Notes & Context</h3>
             <textarea 
               value={listData.notes}
               onChange={handleNotesChange}
-              onBlur={handleNotesBlur} // Saves to DB when you click away
+              onBlur={handleNotesBlur}
               placeholder="Add your notes here... (e.g., 'Screenshot taken on 7/26/2025')"
               className="w-full bg-gray-800 border border-gray-700 rounded-lg p-4 text-white focus:outline-none focus:border-blue-500 min-h-[120px]"
             />
             <p className="text-xs text-gray-500 mt-1">Saves automatically when you click outside the text box.</p>
           </div>
-
         </div>
       </div>
+      
+      {previewItem && (
+        <div 
+          className="fixed inset-0 z-[100] bg-black/90 flex flex-col items-center justify-center p-4"
+          onClick={() => setPreviewItem(null)} 
+        >
+          <img 
+            src={previewItem.image} 
+            alt={previewItem.label} 
+            className="max-w-full max-h-[80vh] object-contain border-4 border-gray-700 rounded-lg shadow-2xl" 
+            onClick={(e) => e.stopPropagation()} 
+          />
+          
+          <div className="flex gap-4 mt-6">
+            <a 
+              href={previewItem.image} 
+              download={previewItem.label} 
+              onClick={(e) => e.stopPropagation()} 
+              className="bg-blue-600 hover:bg-blue-500 px-6 py-2 rounded font-bold text-white shadow-lg text-center"
+            >
+              📥 Download Original
+            </a>
+            <button 
+              onClick={() => setPreviewItem(null)} 
+              className="bg-gray-600 hover:bg-gray-500 px-6 py-2 rounded font-bold text-white shadow-lg"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
       
       <DragOverlay>
         {activeId ? (
