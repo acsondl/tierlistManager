@@ -12,10 +12,11 @@ import (
 	"gorm.io/gorm"
 )
 
-// 1. UPDATED: Added OrderIndex to the TierList so we can reorder them!
+// 1. UPDATED: Added Notes for Feature 6
 type TierList struct {
 	ID         uint   `gorm:"primaryKey" json:"id"`
 	Name       string `json:"name"`
+	Notes      string `json:"notes"` // <--- NEW FIELD
 	OrderIndex int    `json:"order_index"`
 }
 
@@ -80,11 +81,10 @@ func main() {
 	}
 	fmt.Println("Successfully connected to PostgreSQL securely!")
 
-	// GORM will automatically add the new "order_index" column to TierList!
 	db.AutoMigrate(&TierList{}, &Item{}, &TierRow{})
 	fmt.Println("Database tables synced!")
 
-	// ENDPOINT: Fetch Lists (Ordered by index now!)
+	// ENDPOINT: Lists (GET all, and DELETE)
 	http.HandleFunc("/api/lists", enableCORS(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
 			var lists []TierList
@@ -96,6 +96,27 @@ func main() {
 			db.Where("tier_list_id = ?", listID).Delete(&Item{})
 			db.Where("tier_list_id = ?", listID).Delete(&TierRow{})
 			db.Delete(&TierList{}, "id = ?", listID)
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+
+	// --- NEW ENDPOINT: Fetch a Single List (For Editor Title/Notes) ---
+	http.HandleFunc("/api/lists/single", enableCORS(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			listID := r.URL.Query().Get("id")
+			var list TierList
+			db.First(&list, listID)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(list)
+		}
+	}))
+
+	// --- NEW ENDPOINT: Update a List (Rename Title or Save Notes) ---
+	http.HandleFunc("/api/lists/update", enableCORS(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			var updatedList TierList
+			json.NewDecoder(r.Body).Decode(&updatedList)
+			db.Save(&updatedList)
 			w.WriteHeader(http.StatusOK)
 		}
 	}))
@@ -117,7 +138,7 @@ func main() {
 		}
 	}))
 
-	// NEW ENDPOINT: Save Drag-and-Drop Reordered Lists
+	// ENDPOINT: Save Drag-and-Drop Reordered Lists
 	http.HandleFunc("/api/lists/bulk", enableCORS(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" {
 			var lists []TierList
@@ -150,7 +171,7 @@ func main() {
 		}
 	}))
 
-	// ENDPOINT: Create Tier (Reverted to spawn at BOTTOM)
+	// ENDPOINT: Create Tier (Spawns at BOTTOM)
 	http.HandleFunc("/api/tiers/new", enableCORS(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" {
 			var newTier TierRow

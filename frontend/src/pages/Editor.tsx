@@ -6,8 +6,10 @@ import { CSS } from '@dnd-kit/utilities';
 import '../index.css';
 
 // REPLACE THESE WITH YOUR ACTUAL TAILSCALE IP
-const ITEMS_API = "https://linux.tail2f8d37.ts.net:8444/api/items";
-const TIERS_API = "https://linux.tail2f8d37.ts.net:8444/api/tiers";
+const API_BASE = "https://linux.tail2f8d37.ts.net:8444/api";
+const ITEMS_API = `${API_BASE}/items`;
+const TIERS_API = `${API_BASE}/tiers`;
+const LISTS_API = `${API_BASE}/lists`;
 
 const COLORS = ["bg-red-500", "bg-orange-500", "bg-yellow-500", "bg-green-500", "bg-blue-500", "bg-purple-500", "bg-pink-500", "bg-gray-400"];
 
@@ -45,6 +47,10 @@ function TrashZone() {
 export default function Editor() {
   const { id: listId } = useParams(); 
 
+  const [listData, setListData] = useState<any>({ name: "Loading...", notes: "" });
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [editTitle, setEditTitle] = useState("");
+
   const [items, setItems] = useState<any[]>([]);
   const [tiers, setTiers] = useState<any[]>([]); 
   
@@ -74,9 +80,45 @@ export default function Editor() {
 
   useEffect(() => {
     if (!listId) return;
+    // Fetch List Metadata (Title and Notes)
+    fetch(`${LISTS_API}/single?id=${listId}`)
+      .then(res => res.json())
+      .then(data => {
+        if (data) {
+          setListData(data);
+          setEditTitle(data.name);
+        }
+      });
+
     fetch(`${ITEMS_API}?list_id=${listId}`).then(res => res.json()).then(data => setItems(data || []));
     fetch(`${TIERS_API}?list_id=${listId}`).then(res => res.json()).then(data => setTiers(data || []));
   }, [listId]);
+
+  // NEW: Save the updated List Title or Notes
+  const saveListMetadata = (updatedData: any) => {
+    setSavingCount(prev => prev + 1);
+    fetch(LISTS_API + "/update", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updatedData)
+    }).finally(() => setSavingCount(prev => prev - 1));
+  };
+
+  const handleSaveTitle = () => {
+    const updated = { ...listData, name: editTitle.trim() };
+    setListData(updated);
+    saveListMetadata(updated);
+    setIsEditingTitle(false);
+  };
+
+  const handleNotesChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setListData({ ...listData, notes: e.target.value });
+  };
+
+  const handleNotesBlur = () => {
+    // Save to database only when the user clicks away from the text box
+    saveListMetadata(listData);
+  };
 
   const saveToDatabase = (newItems: any[]) => {
     setSavingCount(prev => prev + 1); 
@@ -89,7 +131,6 @@ export default function Editor() {
 
   const handleAddTier = () => {
     const newTier = { id: `tier-${listId}-${Date.now()}`, label: "NEW", color: "bg-gray-400", tier_list_id: Number(listId) };
-    
     setSavingCount(prev => prev + 1);
     fetch(TIERS_API + "/new", {
       method: "POST",
@@ -97,46 +138,33 @@ export default function Editor() {
       body: JSON.stringify(newTier)
     })
       .then(res => res.json())
-      .then(savedTier => {
-        // Because the backend sets this to the top, we PREPEND it to our local array!
-        setTiers(prev => [...prev, savedTier]);
-      })
+      .then(savedTier => setTiers(prev => [...prev, savedTier]))
       .finally(() => setSavingCount(prev => prev - 1));
   };
 
-  // NEW: Delete Tier Row Logic
   const handleDeleteTier = (tierId: string) => {
     if (!window.confirm("Delete this tier? Any items inside it will be moved to the Unranked Pool.")) return;
-    
-    // 1. Move the items locally
     setItems(prev => prev.map(item => item.tier === tierId ? { ...item, tier: 'pool' } : item));
-    // 2. Delete the tier locally
     setTiers(prev => prev.filter(t => t.id !== tierId));
     setEditingTierId(null);
-    
-    // 3. Tell the backend to delete it
     setSavingCount(prev => prev + 1);
     fetch(`${TIERS_API}?id=${tierId}`, { method: 'DELETE' }).finally(() => setSavingCount(prev => prev - 1));
   };
 
-  // NEW: Move Tier Row Up/Down Logic
   const moveTier = (tierId: string, direction: number) => {
     const index = tiers.findIndex(t => t.id === tierId);
     if (index < 0) return;
     const newIndex = index + direction;
-    if (newIndex < 0 || newIndex >= tiers.length) return; // Prevent going out of bounds
+    if (newIndex < 0 || newIndex >= tiers.length) return; 
 
     const newTiers = [...tiers];
-    // Swap the elements
     const temp = newTiers[index];
     newTiers[index] = newTiers[newIndex];
     newTiers[newIndex] = temp;
 
-    // Update their order_indexes
     const updatedTiers = newTiers.map((t, i) => ({ ...t, order_index: i }));
-    setTiers(updatedTiers); // Update screen instantly
+    setTiers(updatedTiers); 
     
-    // Save new order to Database
     setSavingCount(prev => prev + 1);
     fetch(TIERS_API + "/bulk", {
       method: "POST",
@@ -163,7 +191,6 @@ export default function Editor() {
     }).finally(() => setSavingCount(prev => prev - 1));
   };
 
-  // ... [PASTE/ADD/UPLOAD EVENT LISTENERS STAY THE SAME] ...
   useEffect(() => {
     const handlePaste = (e: ClipboardEvent) => {
       const clipboardItems = e.clipboardData?.items;
@@ -285,14 +312,40 @@ export default function Editor() {
 
       <div className="min-h-screen bg-[#111111] text-white p-2 md:p-6 font-sans flex flex-col items-center">
         
-        <div className="w-full max-w-4xl mb-4 self-start md:self-auto md:w-full flex justify-between">
+        <div className="w-full max-w-4xl mb-4 self-start md:self-auto md:w-full flex justify-between items-center">
           <Link to="/" className="text-gray-400 hover:text-gray-200 font-semibold transition-colors flex items-center gap-2">
             ← Back to Menu
           </Link>
           {savingCount > 0 && <span className="text-yellow-500 font-bold animate-pulse">Saving...</span>}
         </div>
+
+        {/* FEATURE 1: Editable List Title */}
+        <div className="w-full max-w-4xl mb-6 flex justify-center">
+          {isEditingTitle ? (
+            <div className="flex gap-2 w-full max-w-md">
+              <input 
+                autoFocus
+                type="text" 
+                value={editTitle} 
+                onChange={(e) => setEditTitle(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSaveTitle()}
+                className="flex-1 bg-gray-800 text-3xl font-bold text-center text-white border-b-2 border-blue-500 focus:outline-none py-1"
+              />
+              <button onClick={handleSaveTitle} className="bg-green-600 hover:bg-green-500 px-4 rounded font-bold">Save</button>
+            </div>
+          ) : (
+            <h1 
+              onClick={() => setIsEditingTitle(true)}
+              className="text-3xl md:text-5xl font-bold text-gray-100 cursor-pointer hover:text-blue-400 transition-colors group flex items-center gap-3"
+            >
+              {listData.name}
+              <span className="text-xl opacity-0 group-hover:opacity-100 text-gray-500">✏️</span>
+            </h1>
+          )}
+        </div>
         
-        <div className="w-full max-w-4xl flex flex-col border-2 border-black bg-[#1a1a1a] mb-2">
+        {/* Tier Grid */}
+        <div className="w-full max-w-4xl flex flex-col border-2 border-black bg-[#1a1a1a] mb-6">
           {tiers.map((tier, index) => (
             <div key={tier.id} className="flex border-b border-black min-h-[64px] md:min-h-[80px]">
               
@@ -304,14 +357,10 @@ export default function Editor() {
                       <button key={c} onClick={() => setEditTierColor(c)} className={`w-4 h-4 md:w-5 md:h-5 rounded-full cursor-pointer border-2 ${editTierColor === c ? 'border-white' : 'border-transparent'} ${c}`} />
                     ))}
                   </div>
-                  
-                  {/* NEW: REORDER BUTTONS */}
                   <div className="flex justify-between gap-1 w-full">
                      <button onClick={() => moveTier(tier.id, -1)} disabled={index === 0} className="flex-1 bg-gray-700 hover:bg-gray-600 disabled:opacity-30 disabled:cursor-not-allowed text-white text-xs font-bold py-1 rounded">⬆️</button>
                      <button onClick={() => moveTier(tier.id, 1)} disabled={index === tiers.length - 1} className="flex-1 bg-gray-700 hover:bg-gray-600 disabled:opacity-30 disabled:cursor-not-allowed text-white text-xs font-bold py-1 rounded">⬇️</button>
                   </div>
-
-                  {/* NEW: SAVE & DELETE BUTTONS */}
                   <div className="flex justify-between gap-1 w-full">
                     <button onClick={() => saveTierEdit(tier)} className="flex-1 bg-green-600 hover:bg-green-500 text-white text-xs font-bold py-1 rounded">Save</button>
                     <button onClick={() => handleDeleteTier(tier.id)} className="bg-red-600 hover:bg-red-500 text-white text-xs font-bold px-2 py-1 rounded" title="Delete Row">🗑️</button>
@@ -331,28 +380,49 @@ export default function Editor() {
           ))}
         </div>
         
-        {/* NEW: Add Row Button */}
-        <div className="w-full max-w-4xl flex justify-center mb-12">
-          <button onClick={handleAddTier} className="bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white font-bold py-2 px-6 rounded-b border-2 border-t-0 border-black transition-colors">
-            ➕ Add Row
-          </button>
-        </div>
-        
+        {/* THE CONTROL PANEL: We moved Add Row in here! */}
         <div className="w-full max-w-4xl px-2 md:px-0">
           <div className="mb-6 bg-gray-800 p-4 rounded border border-gray-700 shadow-xl flex flex-col md:flex-row gap-4 justify-between items-center">
+            
             <form onSubmit={handleAddText} className="flex gap-2 w-full md:w-auto">
               <input type="text" value={inputValue} onChange={(e) => setInputValue(e.target.value)} placeholder="Type a label..." className="flex-1 md:w-64 bg-gray-900 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500" />
               <button type="submit" className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 px-4 rounded shadow">Add Text</button>
             </form>
-            <span className="text-gray-500 font-bold hidden md:block">OR</span>
-            <label className="w-full md:w-auto bg-green-600 hover:bg-green-500 text-white font-bold py-2 px-6 rounded shadow cursor-pointer text-center">
-              Upload Image
-              <input type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
-            </label>
+
+            {/* FEATURE 4: Moving the Add Row button here as an icon button */}
+            <div className="flex gap-4 items-center w-full md:w-auto">
+              <button 
+                onClick={handleAddTier} 
+                className="bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded shadow flex-1 md:flex-none flex items-center justify-center gap-2"
+                title="Add new tier row"
+              >
+                ➕ Add Row
+              </button>
+
+              <label className="bg-green-600 hover:bg-green-500 text-white font-bold py-2 px-6 rounded shadow cursor-pointer text-center flex-1 md:flex-none">
+                Upload Image
+                <input type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
+              </label>
+            </div>
+
           </div>
 
           <SortableZone id="pool" items={items.filter(item => item.tier === 'pool')} className="bg-[#1a1a1a] border-2 border-black min-h-[150px] p-2 flex flex-wrap content-start gap-1 shadow-xl" />
           <TrashZone />
+          
+          {/* FEATURE 6: The Notes Area */}
+          <div className="mt-8">
+            <h3 className="text-xl font-bold mb-2 text-gray-300">Notes & Context</h3>
+            <textarea 
+              value={listData.notes}
+              onChange={handleNotesChange}
+              onBlur={handleNotesBlur} // Saves to DB when you click away
+              placeholder="Add your notes here... (e.g., 'Screenshot taken on 7/26/2025')"
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg p-4 text-white focus:outline-none focus:border-blue-500 min-h-[120px]"
+            />
+            <p className="text-xs text-gray-500 mt-1">Saves automatically when you click outside the text box.</p>
+          </div>
+
         </div>
       </div>
       
