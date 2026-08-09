@@ -12,9 +12,11 @@ import (
 	"gorm.io/gorm"
 )
 
+// 1. UPDATED: Added OrderIndex to the TierList so we can reorder them!
 type TierList struct {
-	ID   uint   `gorm:"primaryKey" json:"id"`
-	Name string `json:"name"`
+	ID         uint   `gorm:"primaryKey" json:"id"`
+	Name       string `json:"name"`
+	OrderIndex int    `json:"order_index"`
 }
 
 type Item struct {
@@ -78,36 +80,36 @@ func main() {
 	}
 	fmt.Println("Successfully connected to PostgreSQL securely!")
 
+	// GORM will automatically add the new "order_index" column to TierList!
 	db.AutoMigrate(&TierList{}, &Item{}, &TierRow{})
 	fmt.Println("Database tables synced!")
 
-	// ENDPOINT: Lists (Now handles GET and DELETE)
+	// ENDPOINT: Fetch Lists (Ordered by index now!)
 	http.HandleFunc("/api/lists", enableCORS(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
 			var lists []TierList
-			db.Order("id asc").Find(&lists)
+			db.Order("order_index asc").Find(&lists)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(lists)
 		} else if r.Method == "DELETE" {
-			// NEW: Handle Deleting entire lists
 			listID := r.URL.Query().Get("id")
-
-			// 1. Delete all items inside the list
 			db.Where("tier_list_id = ?", listID).Delete(&Item{})
-			// 2. Delete all tier rows inside the list
 			db.Where("tier_list_id = ?", listID).Delete(&TierRow{})
-			// 3. Finally, delete the list itself
 			db.Delete(&TierList{}, "id = ?", listID)
-
 			w.WriteHeader(http.StatusOK)
 		}
 	}))
 
-	// ENDPOINT: Create List
+	// ENDPOINT: Create New List (Spawns at TOP)
 	http.HandleFunc("/api/lists/new", enableCORS(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" {
 			var newList TierList
 			json.NewDecoder(r.Body).Decode(&newList)
+
+			// Push all existing lists down by 1
+			db.Exec("UPDATE tier_lists SET order_index = order_index + 1")
+
+			newList.OrderIndex = 0 // Spawn at the top
 			db.Create(&newList)
 			generateDefaultTiers(db, newList.ID)
 			w.Header().Set("Content-Type", "application/json")
@@ -115,7 +117,19 @@ func main() {
 		}
 	}))
 
-	// ENDPOINT: Fetch Tiers
+	// NEW ENDPOINT: Save Drag-and-Drop Reordered Lists
+	http.HandleFunc("/api/lists/bulk", enableCORS(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			var lists []TierList
+			json.NewDecoder(r.Body).Decode(&lists)
+			for _, list := range lists {
+				db.Save(&list)
+			}
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+
+	// ENDPOINT: Fetch/Delete Tiers
 	http.HandleFunc("/api/tiers", enableCORS(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
 			listID := r.URL.Query().Get("list_id")
@@ -128,19 +142,23 @@ func main() {
 			db.Where("tier_list_id = ?", listID).Order("order_index asc").Find(&tiers)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(tiers)
+		} else if r.Method == "DELETE" {
+			tierID := r.URL.Query().Get("id")
+			db.Model(&Item{}).Where("tier = ?", tierID).Update("tier", "pool")
+			db.Delete(&TierRow{}, "id = ?", tierID)
+			w.WriteHeader(http.StatusOK)
 		}
 	}))
 
-	// NEW ENDPOINT: Add a Brand New Tier Row
+	// ENDPOINT: Create Tier (Reverted to spawn at BOTTOM)
 	http.HandleFunc("/api/tiers/new", enableCORS(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" {
 			var newTier TierRow
 			json.NewDecoder(r.Body).Decode(&newTier)
 
-			// Figure out what OrderIndex to give it so it goes to the bottom
 			var count int64
 			db.Model(&TierRow{}).Where("tier_list_id = ?", newTier.TierListID).Count(&count)
-			newTier.OrderIndex = int(count)
+			newTier.OrderIndex = int(count) // Sets index to bottom
 
 			db.Create(&newTier)
 			w.Header().Set("Content-Type", "application/json")
@@ -148,7 +166,6 @@ func main() {
 		}
 	}))
 
-	// ENDPOINT: Update a Tier
 	http.HandleFunc("/api/tiers/update", enableCORS(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" {
 			var updatedTier TierRow
@@ -158,24 +175,31 @@ func main() {
 		}
 	}))
 
+	http.HandleFunc("/api/tiers/bulk", enableCORS(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			var tiers []TierRow
+			json.NewDecoder(r.Body).Decode(&tiers)
+			for _, t := range tiers {
+				db.Save(&t)
+			}
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+
 	// ENDPOINT: Items
 	http.HandleFunc("/api/items", enableCORS(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
 			listID := r.URL.Query().Get("list_id")
 			var items []Item
-
-			// FIX: Safety net!
 			if listID != "" {
 				db.Where("tier_list_id = ?", listID).Find(&items)
 			} else {
-				// Don't fetch everything if the ID is blank, just return empty
 				w.Header().Set("Content-Type", "application/json")
 				json.NewEncoder(w).Encode([]Item{})
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(items)
-
 		} else if r.Method == "DELETE" {
 			itemID := r.URL.Query().Get("id")
 			db.Delete(&Item{}, "id = ?", itemID)
