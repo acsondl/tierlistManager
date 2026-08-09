@@ -4,7 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 
+	// <-- NEW: Allows Go to read operating system variables
+	// <-- NEW: The helper library we just installed
+	"github.com/joho/godotenv"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -17,6 +21,7 @@ type TierList struct {
 type Item struct {
 	ID         string `gorm:"primaryKey" json:"id"`
 	Label      string `json:"label"`
+	Image      string `json:"image"`
 	Tier       string `json:"tier"`
 	TierListID uint   `json:"tier_list_id"`
 }
@@ -36,13 +41,26 @@ func enableCORS(next http.HandlerFunc) http.HandlerFunc {
 
 func main() {
 	// IMPORTANT: Put your Bitwarden password back here!
-	dsn := "host=127.0.0.1 user=tieradmin password=yourpassword dbname=tierlistdb port=5433 sslmode=disable"
+	// 1. Load the hidden .env file
+	err := godotenv.Load()
+	if err != nil {
+		fmt.Println("Warning: No .env file found. Proceeding with system environment variables.")
+	}
+
+	// 2. Fetch the password from the .env file
+	dbPassword := os.Getenv("DB_PASSWORD")
+	if dbPassword == "" {
+		panic("CRITICAL ERROR: DB_PASSWORD is empty! Check your .env file.")
+	}
+
+	// 3. Inject the password into the string dynamically using fmt.Sprintf
+	dsn := fmt.Sprintf("host=127.0.0.1 user=tieradmin password=%s dbname=tierlistdb port=5433 sslmode=disable", dbPassword)
 
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		panic("Failed to connect to database: " + err.Error())
 	}
-	fmt.Println("Successfully connected to PostgreSQL!")
+	fmt.Println("Successfully connected to PostgreSQL securely!")
 
 	db.AutoMigrate(&TierList{}, &Item{})
 	fmt.Println("Database tables synced!")
