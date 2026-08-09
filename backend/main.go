@@ -29,7 +29,7 @@ type Item struct {
 func enableCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, DELETE")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
@@ -82,7 +82,7 @@ func main() {
 		}
 	}))
 
-	// ENDPOINT 2: Fetch items for a specific list
+	// ENDPOINT 2: Fetch items OR Delete an item
 	http.HandleFunc("/api/items", enableCORS(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
 			listID := r.URL.Query().Get("list_id")
@@ -94,6 +94,11 @@ func main() {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(items)
+		} else if r.Method == "DELETE" {
+			// NEW: Handle Deletion
+			itemID := r.URL.Query().Get("id")
+			db.Delete(&Item{}, "id = ?", itemID) // Tells Postgres to permanently delete this ID
+			w.WriteHeader(http.StatusOK)
 		}
 	}))
 
