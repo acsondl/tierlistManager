@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { DndContext, pointerWithin, PointerSensor, useSensor, useSensors, TouchSensor, closestCenter } from '@dnd-kit/core';
+import { DndContext,  PointerSensor, useSensor, useSensors, TouchSensor, closestCenter } from '@dnd-kit/core';
 import { SortableContext, rectSortingStrategy, useSortable, arrayMove } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
