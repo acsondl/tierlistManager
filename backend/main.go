@@ -5,9 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
-	// <-- NEW: Allows Go to read operating system variables
-	// <-- NEW: The helper library we just installed
 	"github.com/joho/godotenv"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -26,6 +25,14 @@ type Item struct {
 	TierListID uint   `json:"tier_list_id"`
 }
 
+type TierRow struct {
+	ID         string `gorm:"primaryKey" json:"id"`
+	Label      string `json:"label"`
+	Color      string `json:"color"`
+	OrderIndex int    `json:"order_index"`
+	TierListID uint   `json:"tier_list_id"`
+}
+
 func enableCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -39,70 +46,143 @@ func enableCORS(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func generateDefaultTiers(db *gorm.DB, listID uint) {
+	baseID := fmt.Sprintf("tier-%d-%d", listID, time.Now().Unix())
+	defaults := []TierRow{
+		{ID: baseID + "-s", Label: "S", Color: "bg-red-500", OrderIndex: 0, TierListID: listID},
+		{ID: baseID + "-a", Label: "A", Color: "bg-orange-500", OrderIndex: 1, TierListID: listID},
+		{ID: baseID + "-b", Label: "B", Color: "bg-yellow-500", OrderIndex: 2, TierListID: listID},
+		{ID: baseID + "-c", Label: "C", Color: "bg-green-500", OrderIndex: 3, TierListID: listID},
+		{ID: baseID + "-d", Label: "D", Color: "bg-blue-500", OrderIndex: 4, TierListID: listID},
+	}
+	for _, tier := range defaults {
+		db.Create(&tier)
+	}
+}
+
 func main() {
-	// IMPORTANT: Put your Bitwarden password back here!
-	// 1. Load the hidden .env file
 	err := godotenv.Load()
 	if err != nil {
-		fmt.Println("Warning: No .env file found. Proceeding with system environment variables.")
+		fmt.Println("Warning: No .env file found.")
 	}
 
-	// 2. Fetch the password from the .env file
 	dbPassword := os.Getenv("DB_PASSWORD")
 	if dbPassword == "" {
 		panic("CRITICAL ERROR: DB_PASSWORD is empty! Check your .env file.")
 	}
 
-	// 3. Inject the password into the string dynamically using fmt.Sprintf
 	dsn := fmt.Sprintf("host=127.0.0.1 user=tieradmin password=%s dbname=tierlistdb port=5433 sslmode=disable", dbPassword)
-
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		panic("Failed to connect to database: " + err.Error())
 	}
 	fmt.Println("Successfully connected to PostgreSQL securely!")
 
-	db.AutoMigrate(&TierList{}, &Item{})
+	db.AutoMigrate(&TierList{}, &Item{}, &TierRow{})
 	fmt.Println("Database tables synced!")
 
-	var count int64
-	db.Model(&TierList{}).Count(&count)
-	if count == 0 {
-		db.Create(&TierList{Name: "Global Tier List"})
-		fmt.Println("Created default Global Tier List!")
-	}
-
-	// ENDPOINT 1: Fetch all Tier Lists
+	// ENDPOINT: Lists (Now handles GET and DELETE)
 	http.HandleFunc("/api/lists", enableCORS(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
 			var lists []TierList
 			db.Order("id asc").Find(&lists)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(lists)
-		}
-	}))
-
-	// ENDPOINT 2: Fetch items OR Delete an item
-	http.HandleFunc("/api/items", enableCORS(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "GET" {
-			listID := r.URL.Query().Get("list_id")
-			var items []Item
-			if listID != "" {
-				db.Where("tier_list_id = ?", listID).Find(&items)
-			} else {
-				db.Find(&items)
-			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(items)
 		} else if r.Method == "DELETE" {
-			// NEW: Handle Deletion
-			itemID := r.URL.Query().Get("id")
-			db.Delete(&Item{}, "id = ?", itemID) // Tells Postgres to permanently delete this ID
+			// NEW: Handle Deleting entire lists
+			listID := r.URL.Query().Get("id")
+
+			// 1. Delete all items inside the list
+			db.Where("tier_list_id = ?", listID).Delete(&Item{})
+			// 2. Delete all tier rows inside the list
+			db.Where("tier_list_id = ?", listID).Delete(&TierRow{})
+			// 3. Finally, delete the list itself
+			db.Delete(&TierList{}, "id = ?", listID)
+
 			w.WriteHeader(http.StatusOK)
 		}
 	}))
 
-	// ENDPOINT 3: Save items
+	// ENDPOINT: Create List
+	http.HandleFunc("/api/lists/new", enableCORS(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			var newList TierList
+			json.NewDecoder(r.Body).Decode(&newList)
+			db.Create(&newList)
+			generateDefaultTiers(db, newList.ID)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(newList)
+		}
+	}))
+
+	// ENDPOINT: Fetch Tiers
+	http.HandleFunc("/api/tiers", enableCORS(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			listID := r.URL.Query().Get("list_id")
+			if listID == "" {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode([]TierRow{})
+				return
+			}
+			var tiers []TierRow
+			db.Where("tier_list_id = ?", listID).Order("order_index asc").Find(&tiers)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(tiers)
+		}
+	}))
+
+	// NEW ENDPOINT: Add a Brand New Tier Row
+	http.HandleFunc("/api/tiers/new", enableCORS(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			var newTier TierRow
+			json.NewDecoder(r.Body).Decode(&newTier)
+
+			// Figure out what OrderIndex to give it so it goes to the bottom
+			var count int64
+			db.Model(&TierRow{}).Where("tier_list_id = ?", newTier.TierListID).Count(&count)
+			newTier.OrderIndex = int(count)
+
+			db.Create(&newTier)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(newTier)
+		}
+	}))
+
+	// ENDPOINT: Update a Tier
+	http.HandleFunc("/api/tiers/update", enableCORS(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			var updatedTier TierRow
+			json.NewDecoder(r.Body).Decode(&updatedTier)
+			db.Save(&updatedTier)
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+
+	// ENDPOINT: Items
+	http.HandleFunc("/api/items", enableCORS(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			listID := r.URL.Query().Get("list_id")
+			var items []Item
+
+			// FIX: Safety net!
+			if listID != "" {
+				db.Where("tier_list_id = ?", listID).Find(&items)
+			} else {
+				// Don't fetch everything if the ID is blank, just return empty
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode([]Item{})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(items)
+
+		} else if r.Method == "DELETE" {
+			itemID := r.URL.Query().Get("id")
+			db.Delete(&Item{}, "id = ?", itemID)
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+
 	http.HandleFunc("/api/items/bulk", enableCORS(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" {
 			var items []Item
@@ -111,21 +191,6 @@ func main() {
 				db.Save(&item)
 			}
 			w.WriteHeader(http.StatusOK)
-		}
-	}))
-
-	// ENDPOINT 4: Create a NEW Tier List (NEW!)
-	http.HandleFunc("/api/lists/new", enableCORS(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "POST" {
-			var newList TierList
-			json.NewDecoder(r.Body).Decode(&newList)
-
-			// db.Create automatically generates a new unique ID in Postgres
-			db.Create(&newList)
-
-			// Send the newly created list (with its new ID) back to React
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(newList)
 		}
 	}))
 

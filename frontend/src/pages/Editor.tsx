@@ -1,31 +1,16 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { 
-  DndContext, 
-  pointerWithin, 
-  DragOverlay,
-  PointerSensor,
-  useSensor,
-  useSensors,
-  TouchSensor,
-  useDroppable
-} from '@dnd-kit/core';
-import { 
-  SortableContext, 
-  rectSortingStrategy, 
-  useSortable, 
-  arrayMove 
-} from '@dnd-kit/sortable';
+import { DndContext, pointerWithin, DragOverlay, PointerSensor, useSensor, useSensors, TouchSensor, useDroppable } from '@dnd-kit/core';
+import { SortableContext, rectSortingStrategy, useSortable, arrayMove } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import '../index.css';
 
-const TIERS = [
-  { id: 's', label: 'S', color: 'bg-red-500' },
-  { id: 'a', label: 'A', color: 'bg-orange-500' },
-  { id: 'b', label: 'B', color: 'bg-yellow-500' },
-  { id: 'c', label: 'C', color: 'bg-green-500' },
-  { id: 'd', label: 'D', color: 'bg-blue-500' },
-];
+// REPLACE THESE WITH YOUR ACTUAL TAILSCALE IP
+const ITEMS_API = "https://linux.tail2f8d37.ts.net:8444/api/items";
+const TIERS_API = "https://linux.tail2f8d37.ts.net:8444/api/tiers";
+
+// The allowed colors for our tiers
+const COLORS = ["bg-red-500", "bg-orange-500", "bg-yellow-500", "bg-green-500", "bg-blue-500", "bg-purple-500", "bg-pink-500", "bg-gray-400"];
 
 function SortableItem({ id, label, image }: { id: string, label: string, image?: string }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
@@ -49,16 +34,10 @@ function SortableZone({ id, items, className }: { id: string, items: any[], clas
   );
 }
 
-// NEW COMPONENT: The Trash Can
 function TrashZone() {
   const { setNodeRef, isOver } = useDroppable({ id: 'trash' });
   return (
-    <div 
-      ref={setNodeRef} 
-      className={`w-full p-4 rounded-lg border-2 border-dashed flex items-center justify-center font-bold text-xl transition-colors duration-200 mt-4 ${
-        isOver ? 'bg-red-900 border-red-500 text-red-200 shadow-[0_0_15px_rgba(239,68,68,0.5)]' : 'bg-gray-900 border-gray-700 text-gray-500'
-      }`}
-    >
+    <div ref={setNodeRef} className={`w-full p-4 rounded-lg border-2 border-dashed flex items-center justify-center font-bold text-xl transition-colors duration-200 mt-4 ${isOver ? 'bg-red-900 border-red-500 text-red-200 shadow-[0_0_15px_rgba(239,68,68,0.5)]' : 'bg-gray-900 border-gray-700 text-gray-500'}`}>
       🗑️ Drag Here to Delete
     </div>
   );
@@ -66,38 +45,112 @@ function TrashZone() {
 
 export default function Editor() {
   const { id: listId } = useParams(); 
-  const BACKEND_URL = "https://linux.tail2f8d37.ts.net:8444/api/items";
 
   const [items, setItems] = useState<any[]>([]);
+  const [tiers, setTiers] = useState<any[]>([]); 
+  
   const [activeId, setActiveId] = useState<string | null>(null);
   const [inputValue, setInputValue] = useState('');
+
+  // UI STATE: Track which tier is being edited
+  const [editingTierId, setEditingTierId] = useState<string | null>(null);
+  const [editTierLabel, setEditTierLabel] = useState("");
+  const [editTierColor, setEditTierColor] = useState("");
+
+  // SAFETY STATE: Tracks active database saves
+  const [savingCount, setSavingCount] = useState(0);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
     useSensor(TouchSensor, { activationConstraint: { distance: 5 } }) 
   );
 
+  // THE SAFETY LOCK: Intercepts the browser refresh/close button if savingCount > 0
   useEffect(() => {
-    fetch(`${BACKEND_URL}?list_id=${listId}`)
-      .then(response => response.json())
-      .then(data => { if (data && data.length > 0) setItems(data); else setItems([]); })
-      .catch(error => console.error("Error fetching data:", error));
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (savingCount > 0) {
+        e.preventDefault();
+        e.returnValue = "Your work is still saving. Are you sure you want to leave?";
+      }
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [savingCount]);
+
+  useEffect(() => {
+    if (!listId) return;
+    fetch(`${ITEMS_API}?list_id=${listId}`).then(res => res.json()).then(data => setItems(data || []));
+    fetch(`${TIERS_API}?list_id=${listId}`).then(res => res.json()).then(data => setTiers(data || []));
   }, [listId]);
 
+  const saveToDatabase = (newItems: any[]) => {
+    setSavingCount(prev => prev + 1); // Lock the browser
+    fetch(ITEMS_API + "/bulk", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(newItems)
+    })
+    .catch(err => console.error(err))
+    .finally(() => setSavingCount(prev => prev - 1)); // Unlock the browser when done
+  };
+
+  const startEditing = (tier: any) => {
+    setEditingTierId(tier.id);
+    setEditTierLabel(tier.label);
+    setEditTierColor(tier.color);
+  };
+
+  const saveTierEdit = (tier: any) => {
+    const updatedTier = { ...tier, label: editTierLabel.trim(), color: editTierColor };
+    
+    // Update React instantly
+    setTiers(prev => prev.map(t => t.id === tier.id ? updatedTier : t));
+    setEditingTierId(null);
+    
+    // Save to Database
+    setSavingCount(prev => prev + 1);
+    fetch(TIERS_API + "/update", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updatedTier)
+    }).finally(() => setSavingCount(prev => prev - 1));
+  };
+
+
+  //a new function:new row
+  // NEW: Add a blank tier row
+  const handleAddTier = () => {
+    const newTier = {
+      id: `tier-${listId}-${Date.now()}`,
+      label: "NEW",
+      color: "bg-gray-400",
+      tier_list_id: Number(listId)
+    };
+    
+    setSavingCount(prev => prev + 1);
+    fetch(TIERS_API + "/new", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(newTier)
+    })
+      .then(res => res.json())
+      .then(savedTier => setTiers(prev => [...prev, savedTier]))
+      .finally(() => setSavingCount(prev => prev - 1));
+  };
+
+
+  // ... (Keep handlePaste, handleAddText, handleImageUpload EXACTLY the same, but remember to wrap their save logic) ...
   useEffect(() => {
     const handlePaste = (e: ClipboardEvent) => {
       const clipboardItems = e.clipboardData?.items;
       if (!clipboardItems) return;
-
       for (let i = 0; i < clipboardItems.length; i++) {
         if (clipboardItems[i].type.indexOf('image') !== -1) {
           const file = clipboardItems[i].getAsFile();
           if (!file) continue;
-
           const reader = new FileReader();
           reader.onloadend = () => {
-            const base64String = reader.result as string;
-            const newItem = { id: `item-${Date.now()}`, label: 'Pasted Image', image: base64String, tier: 'pool', tier_list_id: Number(listId) };
+            const newItem = { id: `item-${Date.now()}`, label: 'Pasted Image', image: reader.result as string, tier: 'pool', tier_list_id: Number(listId) };
             setItems((prev) => {
               const updated = [...prev, newItem];
               saveToDatabase(updated);
@@ -111,14 +164,6 @@ export default function Editor() {
     window.addEventListener('paste', handlePaste);
     return () => window.removeEventListener('paste', handlePaste);
   }, [listId]);
-
-  const saveToDatabase = (newItems: any[]) => {
-    fetch(BACKEND_URL + "/bulk", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(newItems)
-    }).catch(error => console.error("Error saving data:", error));
-  };
 
   function handleAddText(e: React.FormEvent) {
     e.preventDefault(); 
@@ -137,8 +182,7 @@ export default function Editor() {
     if (!file) return;
     const reader = new FileReader();
     reader.onloadend = () => {
-      const base64String = reader.result as string; 
-      const newItem = { id: `item-${Date.now()}`, label: file.name, image: base64String, tier: 'pool', tier_list_id: Number(listId) };
+      const newItem = { id: `item-${Date.now()}`, label: file.name, image: reader.result as string, tier: 'pool', tier_list_id: Number(listId) };
       setItems((prev) => {
         const updated = [...prev, newItem];
         saveToDatabase(updated);
@@ -155,10 +199,7 @@ export default function Editor() {
     if (!over) return;
     const activeId = active.id;
     const overId = over.id;
-    if (activeId === overId) return;
-
-    // Do nothing to the sorting array while hovering over the Trash zone
-    if (overId === 'trash') return;
+    if (activeId === overId || overId === 'trash') return;
 
     setItems((prevItems) => {
       const activeIndex = prevItems.findIndex(item => item.id === activeId);
@@ -167,7 +208,7 @@ export default function Editor() {
       const overItem = prevItems[overIndex];
 
       if (!activeItem) return prevItems;
-      const isOverContainer = TIERS.some(t => t.id === overId) || overId === 'pool';
+      const isOverContainer = tiers.some(t => t.id === overId) || overId === 'pool';
 
       if (isOverContainer) {
         if (activeItem.tier === overId) return prevItems; 
@@ -175,7 +216,6 @@ export default function Editor() {
         updatedItems[activeIndex] = { ...activeItem, tier: String(overId) };
         return arrayMove(updatedItems, activeIndex, updatedItems.length - 1);
       }
-
       if (overItem && activeItem.tier !== overItem.tier) {
         const updatedItems = [...prevItems];
         updatedItems[activeIndex] = { ...activeItem, tier: overItem.tier };
@@ -190,15 +230,10 @@ export default function Editor() {
     setActiveId(null);
     if (!over) return;
 
-    // NEW: Execute the Deletion if dropped in the Trash Zone
     if (over.id === 'trash') {
       setItems((prev) => {
         const updated = prev.filter(item => item.id !== active.id);
-        
-        // Tell the Go backend to delete it permanently
-        fetch(`${BACKEND_URL}?id=${active.id}`, { method: 'DELETE' })
-          .catch(err => console.error("Error deleting:", err));
-          
+        fetch(`${ITEMS_API}?id=${active.id}`, { method: 'DELETE' }).catch(err => console.error(err));
         return updated;
       });
       return;
@@ -222,25 +257,71 @@ export default function Editor() {
 
   return (
     <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragStart={handleDragStart} onDragOver={handleDragOver} onDragEnd={handleDragEnd}>
+      
+      {/* THE TAILWIND HACK: This invisible box forces Tailwind to compile the colors! */}
+      <div className="hidden bg-red-500 bg-orange-500 bg-yellow-500 bg-green-500 bg-blue-500 bg-purple-500 bg-pink-500 bg-gray-400"></div>
+
       <div className="min-h-screen bg-[#111111] text-white p-2 md:p-6 font-sans flex flex-col items-center">
         
-        <div className="w-full max-w-4xl mb-4 self-start md:self-auto md:w-full">
+        <div className="w-full max-w-4xl mb-4 self-start md:self-auto md:w-full flex justify-between">
           <Link to="/" className="text-gray-400 hover:text-gray-200 font-semibold transition-colors flex items-center gap-2">
             ← Back to Menu
           </Link>
+          {savingCount > 0 && <span className="text-yellow-500 font-bold animate-pulse">Saving...</span>}
         </div>
         
         <div className="w-full max-w-4xl flex flex-col border-2 border-black bg-[#1a1a1a] mb-12">
-          {TIERS.map((tier) => (
+          {tiers.map((tier) => (
             <div key={tier.id} className="flex border-b border-black min-h-[64px] md:min-h-[80px]">
-              <div className={`${tier.color} w-20 md:w-24 shrink-0 flex items-center justify-center text-xl md:text-2xl font-bold text-black border-r border-black`}>
-                {tier.label}
-              </div>
+              
+              {/* If we are currently editing this specific tier, show the Control Panel */}
+              {editingTierId === tier.id ? (
+                <div className="w-32 md:w-48 shrink-0 flex flex-col p-2 gap-2 bg-gray-800 border-r border-black z-10 justify-center">
+                  <input 
+                    autoFocus
+                    value={editTierLabel} 
+                    onChange={(e) => setEditTierLabel(e.target.value)} 
+                    className="w-full text-black px-1 font-bold rounded"
+                  />
+                  <div className="flex flex-wrap gap-1 justify-center">
+                    {COLORS.map(c => (
+                      <button 
+                        key={c} 
+                        onClick={() => setEditTierColor(c)} 
+                        className={`w-4 h-4 md:w-5 md:h-5 rounded-full cursor-pointer border-2 ${editTierColor === c ? 'border-white' : 'border-transparent'} ${c}`}
+                      />
+                    ))}
+                  </div>
+                  <button onClick={() => saveTierEdit(tier)} className="bg-green-600 hover:bg-green-500 text-white text-xs font-bold py-1 rounded">
+                    Save
+                  </button>
+                </div>
+              ) : (
+                // If not editing, show the normal colored block
+                <div className={`${tier.color} w-20 md:w-24 shrink-0 flex items-center justify-center text-xl md:text-2xl font-bold text-black border-r border-black relative group`}>
+                  <span className="break-words px-1 text-center leading-tight">{tier.label}</span>
+                  <button onClick={() => startEditing(tier)} className="absolute top-1 right-1 text-xs opacity-0 group-hover:opacity-100 hover:scale-125 transition-all bg-black/30 rounded p-1" title="Edit Tier">
+                    ⚙️
+                  </button>
+                </div>
+              )}
+
               <SortableZone id={tier.id} items={items.filter(item => item.tier === tier.id)} className="flex-1 p-1 flex flex-wrap content-start gap-1" />
             </div>
           ))}
         </div>
         
+        {/* NEW: Add Row Button */}
+        <div className="w-full max-w-4xl flex justify-center mb-12">
+          <button 
+            onClick={handleAddTier}
+            className="bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white font-bold py-2 px-3 rounded-b border-2 border-t-0 border-black transition-colors"
+          >
+             Add Row
+          </button>
+        </div>
+
+        {/* ... (Keep the Inputs and TrashZone Exactly the same) ... */}
         <div className="w-full max-w-4xl px-2 md:px-0">
           <div className="mb-6 bg-gray-800 p-4 rounded border border-gray-700 shadow-xl flex flex-col md:flex-row gap-4 justify-between items-center">
             <form onSubmit={handleAddText} className="flex gap-2 w-full md:w-auto">
@@ -255,8 +336,6 @@ export default function Editor() {
           </div>
 
           <SortableZone id="pool" items={items.filter(item => item.tier === 'pool')} className="bg-[#1a1a1a] border-2 border-black min-h-[150px] p-2 flex flex-wrap content-start gap-1 shadow-xl" />
-          
-          {/* THE NEW TRASH DROPZONE */}
           <TrashZone />
         </div>
       </div>
