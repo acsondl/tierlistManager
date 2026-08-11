@@ -3,16 +3,55 @@ import { useParams, Link } from 'react-router-dom';
 import { DndContext, pointerWithin, DragOverlay, PointerSensor, useSensor, useSensors, TouchSensor, useDroppable } from '@dnd-kit/core';
 import { SortableContext, rectSortingStrategy, useSortable, arrayMove } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { toBlob } from 'html-to-image'; // NEW: The modern screenshot library!
+import { toBlob } from 'html-to-image'; 
 import '../index.css';
 
-// REPLACE THESE WITH YOUR ACTUAL TAILSCALE IP
+// (Tailscale IPs removed since we use relative routing now!)
 const API_BASE = "https://linux.tail2f8d37.ts.net:8444/api";
 const ITEMS_API = `${API_BASE}/items`;
 const TIERS_API = `${API_BASE}/tiers`;
 const LISTS_API = `${API_BASE}/lists`;
 
 const COLORS = ["bg-red-500", "bg-orange-500", "bg-yellow-500", "bg-green-500", "bg-blue-500", "bg-purple-500", "bg-pink-500", "bg-gray-400"];
+
+// 🚀 NEW: The Compression Engine
+// This shrinks massive 4K screenshots down to web-friendly sizes instantly
+const compressImage = (file: File): Promise<string> => {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const MAX_SIZE = 512; // 512px max width/height
+        let width = img.width;
+        let height = img.height;
+
+        if (width > height) {
+          if (width > MAX_SIZE) {
+            height *= MAX_SIZE / width;
+            width = MAX_SIZE;
+          }
+        } else {
+          if (height > MAX_SIZE) {
+            width *= MAX_SIZE / height;
+            height = MAX_SIZE;
+          }
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx?.drawImage(img, 0, 0, width, height);
+
+        // Convert to WebP at 80% quality for massive size reduction!
+        resolve(canvas.toDataURL('image/webp', 0.8));
+      };
+      img.src = event.target?.result as string;
+    };
+    reader.readAsDataURL(file);
+  });
+};
 
 function SortableItem({ id, label, image, onPreview }: { id: string, label: string, image?: string, onPreview?: () => void }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
@@ -98,7 +137,6 @@ export default function Editor() {
     fetch(`${TIERS_API}?list_id=${listId}`).then(res => res.json()).then(data => setTiers(data || []));
   }, [listId]);
 
-  // FIX: The new, modern html-to-image export logic
   const handleExportPNG = async () => {
     if (!captureRef.current) return;
     setSavingCount(prev => prev + 1); 
@@ -107,7 +145,6 @@ export default function Editor() {
       const blob = await toBlob(captureRef.current, {
         backgroundColor: '#111111', 
         pixelRatio: 2, 
-        // We tell html-to-image to ignore our edit buttons!
         filter: (node) => {
           if (node instanceof HTMLElement) {
             return !node.hasAttribute('data-html2canvas-ignore');
@@ -127,7 +164,7 @@ export default function Editor() {
       URL.revokeObjectURL(url);
     } catch (err) {
       console.error("Failed to export image", err);
-      alert("Failed to export the image. See browser console for details.");
+      alert("Failed to export the image.");
     } finally {
       setSavingCount(prev => prev - 1);
     }
@@ -215,24 +252,26 @@ export default function Editor() {
       .finally(() => setSavingCount(prev => prev - 1));
   };
 
+  // 🚀 UPDATED: Uses the compression engine for Paste
   useEffect(() => {
-    const handlePaste = (e: ClipboardEvent) => {
+    const handlePaste = async (e: ClipboardEvent) => {
       const clipboardItems = e.clipboardData?.items;
       if (!clipboardItems) return;
+      
       for (let i = 0; i < clipboardItems.length; i++) {
         if (clipboardItems[i].type.indexOf('image') !== -1) {
           const file = clipboardItems[i].getAsFile();
           if (!file) continue;
-          const reader = new FileReader();
-          reader.onloadend = () => {
-            const newItem = { id: `item-${Date.now()}`, label: 'Pasted Image', image: reader.result as string, tier: 'pool', tier_list_id: Number(listId) };
-            setItems((prev) => {
-              const updated = [...prev, newItem];
-              saveToDatabase(updated);
-              return updated;
-            });
-          };
-          reader.readAsDataURL(file);
+          
+          // Wait for compression to finish!
+          const compressedBase64 = await compressImage(file);
+          
+          const newItem = { id: `item-${Date.now()}`, label: 'Pasted Image', image: compressedBase64, tier: 'pool', tier_list_id: Number(listId) };
+          setItems((prev) => {
+            const updated = [...prev, newItem];
+            saveToDatabase(updated);
+            return updated;
+          });
         }
       }
     };
@@ -252,19 +291,19 @@ export default function Editor() {
     setInputValue(''); 
   }
 
-  function handleImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
+  // 🚀 UPDATED: Uses the compression engine for File Uploads
+  async function handleImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const newItem = { id: `item-${Date.now()}`, label: file.name, image: reader.result as string, tier: 'pool', tier_list_id: Number(listId) };
-      setItems((prev) => {
-        const updated = [...prev, newItem];
-        saveToDatabase(updated);
-        return updated;
-      });
-    };
-    reader.readAsDataURL(file);
+    
+    const compressedBase64 = await compressImage(file);
+    
+    const newItem = { id: `item-${Date.now()}`, label: file.name, image: compressedBase64, tier: 'pool', tier_list_id: Number(listId) };
+    setItems((prev) => {
+      const updated = [...prev, newItem];
+      saveToDatabase(updated);
+      return updated;
+    });
   }
 
   function handleDragStart(event: any) { setActiveId(event.active.id); }
@@ -343,10 +382,7 @@ export default function Editor() {
           
           <div className="flex items-center gap-4">
             {savingCount > 0 && <span className="text-yellow-500 font-bold animate-pulse">Saving...</span>}
-            <button 
-              onClick={handleExportPNG}
-              className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-1 px-4 rounded shadow-lg flex items-center gap-2"
-            >
+            <button onClick={handleExportPNG} className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-1 px-4 rounded shadow-lg flex items-center gap-2">
               📸 Export as PNG
             </button>
           </div>
@@ -357,21 +393,11 @@ export default function Editor() {
           <div className="w-full mb-6 flex justify-center">
             {isEditingTitle ? (
               <div className="flex gap-2 w-full max-w-md">
-                <input 
-                  autoFocus
-                  type="text" 
-                  value={editTitle} 
-                  onChange={(e) => setEditTitle(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleSaveTitle()}
-                  className="flex-1 bg-gray-800 text-3xl font-bold text-center text-white border-b-2 border-blue-500 focus:outline-none py-1"
-                />
+                <input autoFocus type="text" value={editTitle} onChange={(e) => setEditTitle(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSaveTitle()} className="flex-1 bg-gray-800 text-3xl font-bold text-center text-white border-b-2 border-blue-500 focus:outline-none py-1" />
                 <button onClick={handleSaveTitle} className="bg-green-600 hover:bg-green-500 px-4 rounded font-bold" data-html2canvas-ignore>Save</button>
               </div>
             ) : (
-              <h1 
-                onClick={() => setIsEditingTitle(true)}
-                className="text-3xl md:text-5xl font-bold text-gray-100 cursor-pointer hover:text-blue-400 transition-colors group flex items-center gap-3"
-              >
+              <h1 onClick={() => setIsEditingTitle(true)} className="text-3xl md:text-5xl font-bold text-gray-100 cursor-pointer hover:text-blue-400 transition-colors group flex items-center gap-3">
                 {listData.name}
                 <span className="text-xl opacity-0 group-hover:opacity-100 text-gray-500" data-html2canvas-ignore>✏️</span>
               </h1>
@@ -440,43 +466,19 @@ export default function Editor() {
           
           <div className="mt-8">
             <h3 className="text-xl font-bold mb-2 text-gray-300">Notes & Context</h3>
-            <textarea 
-              value={listData.notes}
-              onChange={handleNotesChange}
-              onBlur={handleNotesBlur}
-              placeholder="Add your notes here... (e.g., 'Screenshot taken on 7/26/2025')"
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg p-4 text-white focus:outline-none focus:border-blue-500 min-h-[120px]"
-            />
-            <p className="text-xs text-gray-500 mt-1">Saves automatically when you click outside the text box.</p>
+            <textarea value={listData.notes} onChange={handleNotesChange} onBlur={handleNotesBlur} placeholder="Add your notes here..." className="w-full bg-gray-800 border border-gray-700 rounded-lg p-4 text-white focus:outline-none focus:border-blue-500 min-h-[120px]" />
           </div>
         </div>
       </div>
       
       {previewItem && (
-        <div 
-          className="fixed inset-0 z-[100] bg-black/90 flex flex-col items-center justify-center p-4"
-          onClick={() => setPreviewItem(null)} 
-        >
-          <img 
-            src={previewItem.image} 
-            alt={previewItem.label} 
-            className="max-w-full max-h-[80vh] object-contain border-4 border-gray-700 rounded-lg shadow-2xl" 
-            onClick={(e) => e.stopPropagation()} 
-          />
-          
+        <div className="fixed inset-0 z-[100] bg-black/90 flex flex-col items-center justify-center p-4" onClick={() => setPreviewItem(null)}>
+          <img src={previewItem.image} alt={previewItem.label} className="max-w-full max-h-[80vh] object-contain border-4 border-gray-700 rounded-lg shadow-2xl" onClick={(e) => e.stopPropagation()} />
           <div className="flex gap-4 mt-6">
-            <a 
-              href={previewItem.image} 
-              download={previewItem.label} 
-              onClick={(e) => e.stopPropagation()} 
-              className="bg-blue-600 hover:bg-blue-500 px-6 py-2 rounded font-bold text-white shadow-lg text-center"
-            >
-              📥 Download Original
+            <a href={previewItem.image} download={previewItem.label} onClick={(e) => e.stopPropagation()} className="bg-blue-600 hover:bg-blue-500 px-6 py-2 rounded font-bold text-white shadow-lg text-center">
+              📥 Download
             </a>
-            <button 
-              onClick={() => setPreviewItem(null)} 
-              className="bg-gray-600 hover:bg-gray-500 px-6 py-2 rounded font-bold text-white shadow-lg"
-            >
+            <button onClick={() => setPreviewItem(null)} className="bg-gray-600 hover:bg-gray-500 px-6 py-2 rounded font-bold text-white shadow-lg">
               Close
             </button>
           </div>
