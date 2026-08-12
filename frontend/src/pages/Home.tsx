@@ -1,15 +1,12 @@
-//https://linux.tail2f8d37.ts.net:8444/
-
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { DndContext,  PointerSensor, useSensor, useSensors, TouchSensor, closestCenter } from '@dnd-kit/core';
+import { DndContext, PointerSensor, useSensor, useSensors, TouchSensor, closestCenter } from '@dnd-kit/core';
 import { SortableContext, rectSortingStrategy, useSortable, arrayMove } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
-// REPLACE WITH YOUR TAILSCALE IP
+// ⚠️ PUT YOUR TAILSCALE HTTPS URL HERE! (Make sure it ends in /api/lists)
 const BACKEND_URL = "https://linux.tail2f8d37.ts.net:8444/api/lists";
 
-// NEW: The Draggable List Component
 function SortableListCard({ list, onDelete }: { list: any, onDelete: any }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: list.id });
   const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1, zIndex: isDragging ? 50 : 1 };
@@ -20,12 +17,9 @@ function SortableListCard({ list, onDelete }: { list: any, onDelete: any }) {
       style={style} 
       {...attributes} 
       {...listeners} 
-      className="bg-gray-800 p-6 rounded-xl border border-gray-700 hover:border-blue-500 shadow-lg relative cursor-grab active:cursor-grabbing touch-none flex flex-col items-center group"
+      // 🚀 FIX: Swapped touch-none for touch-manipulation to allow mobile scrolling
+      className="bg-gray-800 p-6 rounded-xl border border-gray-700 hover:border-blue-500 shadow-lg relative cursor-grab active:cursor-grabbing touch-manipulation flex flex-col items-center group"
     >
-      {/* 
-        onPointerDown={e => e.stopPropagation()} tells the physics engine:
-        "If they click this button, do NOT count it as a drag attempt!" 
-      */}
       <button 
         onPointerDown={(e) => e.stopPropagation()} 
         onClick={(e) => onDelete(e, list.id)} 
@@ -37,7 +31,6 @@ function SortableListCard({ list, onDelete }: { list: any, onDelete: any }) {
 
       <h2 className="text-2xl font-bold text-gray-100 group-hover:text-blue-400 mt-2 mb-4">{list.name}</h2>
       
-      {/* The explicit open button prevents accidental navigation when dragging */}
       <Link 
         onPointerDown={(e) => e.stopPropagation()} 
         to={`/editor/${list.id}`} 
@@ -53,9 +46,15 @@ export default function Home() {
   const [tierLists, setTierLists] = useState<any[]>([]);
   const [newListName, setNewListName] = useState('');
 
+  // 🚀 FIX: Added the 250ms Touch delay to the Homepage
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    useSensor(TouchSensor, { activationConstraint: { distance: 5 } }) 
+    useSensor(TouchSensor, { 
+      activationConstraint: { 
+        delay: 250, 
+        tolerance: 5 
+      } 
+    }) 
   );
 
   useEffect(() => {
@@ -76,7 +75,6 @@ export default function Home() {
     })
       .then(response => response.json())
       .then(newList => {
-        // Since the backend sets OrderIndex to 0 (top), we prepend it locally!
         setTierLists([newList, ...tierLists]);
         setNewListName(''); 
       })
@@ -92,7 +90,6 @@ export default function Home() {
       .catch(err => console.error("Error deleting list:", err));
   };
 
-  // NEW: Logic to save the new order when you drag a list
   const handleDragEnd = (event: any) => {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
@@ -101,12 +98,9 @@ export default function Home() {
     const newIndex = tierLists.findIndex(list => list.id === over.id);
 
     const reorderedLists = arrayMove(tierLists, oldIndex, newIndex);
-    
-    // Update the local index numbers
     const finalLists = reorderedLists.map((list, index) => ({ ...list, order_index: index }));
     setTierLists(finalLists);
 
-    // Tell Postgres to save the new order
     fetch(BACKEND_URL + "/bulk", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -123,10 +117,9 @@ export default function Home() {
         <button type="submit" className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-6 rounded-lg shadow-lg transition-colors">Create</button>
       </form>
 
-      {/* NEW: The Physics Engine Wrap */}
       <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
         <SortableContext items={tierLists.map(l => l.id)} strategy={rectSortingStrategy}>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 w-full max-w-5xl">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 w-full max-w-5xl pb-24">
             {tierLists.map((list) => (
               <SortableListCard key={list.id} list={list} onDelete={handleDeleteList} />
             ))}

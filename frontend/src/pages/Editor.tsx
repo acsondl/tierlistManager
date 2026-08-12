@@ -4,9 +4,10 @@ import { DndContext, pointerWithin, DragOverlay, PointerSensor, useSensor, useSe
 import { SortableContext, rectSortingStrategy, useSortable, arrayMove } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { toBlob } from 'html-to-image'; 
+import Cropper from 'react-easy-crop'; // 🚀 NEW: The mobile-friendly image slicer!
 import '../index.css';
 
-// (Tailscale IPs removed since we use relative routing now!)
+// ⚠️ PUT YOUR TAILSCALE HTTPS URL HERE! 
 const API_BASE = "https://linux.tail2f8d37.ts.net:8444/api";
 const ITEMS_API = `${API_BASE}/items`;
 const TIERS_API = `${API_BASE}/tiers`;
@@ -14,8 +15,6 @@ const LISTS_API = `${API_BASE}/lists`;
 
 const COLORS = ["bg-red-500", "bg-orange-500", "bg-yellow-500", "bg-green-500", "bg-blue-500", "bg-purple-500", "bg-pink-500", "bg-gray-400"];
 
-// 🚀 NEW: The Compression Engine
-// This shrinks massive 4K screenshots down to web-friendly sizes instantly
 const compressImage = (file: File): Promise<string> => {
   return new Promise((resolve) => {
     const reader = new FileReader();
@@ -23,34 +22,40 @@ const compressImage = (file: File): Promise<string> => {
       const img = new Image();
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        const MAX_SIZE = 512; // 512px max width/height
+        const MAX_SIZE = 512; 
         let width = img.width;
         let height = img.height;
-
-        if (width > height) {
-          if (width > MAX_SIZE) {
-            height *= MAX_SIZE / width;
-            width = MAX_SIZE;
-          }
-        } else {
-          if (height > MAX_SIZE) {
-            width *= MAX_SIZE / height;
-            height = MAX_SIZE;
-          }
-        }
-
+        if (width > height) { if (width > MAX_SIZE) { height *= MAX_SIZE / width; width = MAX_SIZE; } } 
+        else { if (height > MAX_SIZE) { width *= MAX_SIZE / height; height = MAX_SIZE; } }
         canvas.width = width;
         canvas.height = height;
         const ctx = canvas.getContext('2d');
         ctx?.drawImage(img, 0, 0, width, height);
-
-        // Convert to WebP at 80% quality for massive size reduction!
         resolve(canvas.toDataURL('image/webp', 0.8));
       };
       img.src = event.target?.result as string;
     };
     reader.readAsDataURL(file);
   });
+};
+
+// 🚀 NEW: Utility to physically slice the image after you select the crop area
+const getCroppedImg = async (imageSrc: string, pixelCrop: any): Promise<string> => {
+  const image = new Image();
+  image.src = imageSrc;
+  await new Promise(res => image.onload = res);
+
+  const canvas = document.createElement('canvas');
+  canvas.width = pixelCrop.width;
+  canvas.height = pixelCrop.height;
+  const ctx = canvas.getContext('2d');
+
+  ctx?.drawImage(
+    image,
+    pixelCrop.x, pixelCrop.y, pixelCrop.width, pixelCrop.height,
+    0, 0, pixelCrop.width, pixelCrop.height
+  );
+  return canvas.toDataURL('image/webp', 0.9);
 };
 
 function SortableItem({ id, label, image, onPreview }: { id: string, label: string, image?: string, onPreview?: () => void }) {
@@ -63,8 +68,9 @@ function SortableItem({ id, label, image, onPreview }: { id: string, label: stri
       style={style} 
       {...listeners} 
       {...attributes} 
-      onDoubleClick={onPreview} 
-      className="w-16 h-16 md:w-20 md:h-20 touch-none bg-gray-700 flex items-center justify-center text-center font-bold text-xs md:text-sm shadow-sm cursor-grab active:cursor-grabbing hover:opacity-80 z-50 relative overflow-hidden shrink-0"
+      onDoubleClick={onPreview}
+      title={label} // 🚀 FIX: This creates the "invisible text" tooltip on hover!
+      className="w-16 h-16 md:w-20 md:h-20 touch-manipulation bg-gray-700 flex items-center justify-center text-center font-bold text-xs md:text-sm shadow-sm cursor-grab active:cursor-grabbing hover:opacity-80 z-50 relative overflow-hidden shrink-0"
     >
       {image ? <img src={image} alt={label} className="w-full h-full object-cover pointer-events-none" /> : <span className="p-1 break-words">{label}</span>}
     </div>
@@ -109,20 +115,25 @@ export default function Editor() {
   const [editTierColor, setEditTierColor] = useState("");
   const [savingCount, setSavingCount] = useState(0);
 
-  const [previewItem, setPreviewItem] = useState<{ label: string, image: string } | null>(null);
+  // 🚀 NEW: State for Preview, Description Editing, and Cropping
+  const [previewItem, setPreviewItem] = useState<any | null>(null);
+  const [editDescription, setEditDescription] = useState("");
+  const [isCropping, setIsCropping] = useState(false);
+  const [crop, setCrop] = useState({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState(1);
+  const [croppedAreaPixels, setCroppedAreaPixels] = useState(null);
+
+  const [exportPreview, setExportPreview] = useState<string | null>(null);
   const captureRef = useRef<HTMLDivElement>(null);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    useSensor(TouchSensor, { activationConstraint: { distance: 5 } }) 
+    useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 5 } }) 
   );
 
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (savingCount > 0) {
-        e.preventDefault();
-        e.returnValue = "Your work is still saving. Are you sure you want to leave?";
-      }
+      if (savingCount > 0) { e.preventDefault(); e.returnValue = "Your work is still saving."; }
     };
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
@@ -140,43 +151,23 @@ export default function Editor() {
   const handleExportPNG = async () => {
     if (!captureRef.current) return;
     setSavingCount(prev => prev + 1); 
-    
     try {
       const blob = await toBlob(captureRef.current, {
-        backgroundColor: '#111111', 
-        pixelRatio: 2, 
+        backgroundColor: '#111111', pixelRatio: 2, 
         filter: (node) => {
-          if (node instanceof HTMLElement) {
-            return !node.hasAttribute('data-html2canvas-ignore');
-          }
+          if (node instanceof HTMLElement) return !node.hasAttribute('data-html2canvas-ignore');
           return true;
         }
       });
-      
       if (!blob) throw new Error("Failed to generate blob.");
-
       const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `${listData.name}-TierList.png`; 
-      link.click();
-      
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      console.error("Failed to export image", err);
-      alert("Failed to export the image.");
-    } finally {
-      setSavingCount(prev => prev - 1);
-    }
+      setExportPreview(url); 
+    } catch (err) { alert("Failed to export the image."); } finally { setSavingCount(prev => prev - 1); }
   };
 
   const saveListMetadata = (updatedData: any) => {
     setSavingCount(prev => prev + 1);
-    fetch(LISTS_API + "/update", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(updatedData)
-    }).finally(() => setSavingCount(prev => prev - 1));
+    fetch(LISTS_API + "/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(updatedData) }).finally(() => setSavingCount(prev => prev - 1));
   };
 
   const handleSaveTitle = () => {
@@ -186,19 +177,12 @@ export default function Editor() {
     setIsEditingTitle(false);
   };
 
-  const handleNotesChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setListData({ ...listData, notes: e.target.value });
-  };
-
+  const handleNotesChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => setListData({ ...listData, notes: e.target.value });
   const handleNotesBlur = () => saveListMetadata(listData);
 
   const saveToDatabase = (newItems: any[]) => {
     setSavingCount(prev => prev + 1); 
-    fetch(ITEMS_API + "/bulk", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(newItems)
-    }).catch(err => console.error(err)).finally(() => setSavingCount(prev => prev - 1)); 
+    fetch(ITEMS_API + "/bulk", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(newItems) }).catch(err => console.error(err)).finally(() => setSavingCount(prev => prev - 1)); 
   };
 
   const handleAddTier = () => {
@@ -224,54 +208,37 @@ export default function Editor() {
     if (index < 0) return;
     const newIndex = index + direction;
     if (newIndex < 0 || newIndex >= tiers.length) return; 
-
     const newTiers = [...tiers];
     const temp = newTiers[index];
     newTiers[index] = newTiers[newIndex];
     newTiers[newIndex] = temp;
-
     const updatedTiers = newTiers.map((t, i) => ({ ...t, order_index: i }));
     setTiers(updatedTiers); 
     setSavingCount(prev => prev + 1);
-    fetch(TIERS_API + "/bulk", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(updatedTiers) })
-      .finally(() => setSavingCount(prev => prev - 1));
+    fetch(TIERS_API + "/bulk", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(updatedTiers) }).finally(() => setSavingCount(prev => prev - 1));
   };
 
-  const startEditing = (tier: any) => {
-    setEditingTierId(tier.id);
-    setEditTierLabel(tier.label);
-    setEditTierColor(tier.color);
-  };
+  const startEditing = (tier: any) => { setEditingTierId(tier.id); setEditTierLabel(tier.label); setEditTierColor(tier.color); };
 
   const saveTierEdit = (tier: any) => {
     const updatedTier = { ...tier, label: editTierLabel.trim(), color: editTierColor };
     setTiers(prev => prev.map(t => t.id === tier.id ? updatedTier : t));
     setEditingTierId(null);
     setSavingCount(prev => prev + 1);
-    fetch(TIERS_API + "/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(updatedTier) })
-      .finally(() => setSavingCount(prev => prev - 1));
+    fetch(TIERS_API + "/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(updatedTier) }).finally(() => setSavingCount(prev => prev - 1));
   };
 
-  // 🚀 UPDATED: Uses the compression engine for Paste
   useEffect(() => {
     const handlePaste = async (e: ClipboardEvent) => {
       const clipboardItems = e.clipboardData?.items;
       if (!clipboardItems) return;
-      
       for (let i = 0; i < clipboardItems.length; i++) {
         if (clipboardItems[i].type.indexOf('image') !== -1) {
           const file = clipboardItems[i].getAsFile();
           if (!file) continue;
-          
-          // Wait for compression to finish!
           const compressedBase64 = await compressImage(file);
-          
           const newItem = { id: `item-${Date.now()}`, label: 'Pasted Image', image: compressedBase64, tier: 'pool', tier_list_id: Number(listId) };
-          setItems((prev) => {
-            const updated = [...prev, newItem];
-            saveToDatabase(updated);
-            return updated;
-          });
+          setItems((prev) => { const updated = [...prev, newItem]; saveToDatabase(updated); return updated; });
         }
       }
     };
@@ -283,27 +250,18 @@ export default function Editor() {
     e.preventDefault(); 
     if (inputValue.trim() === '') return; 
     const newItem = { id: `item-${Date.now()}`, label: inputValue.trim(), tier: 'pool', tier_list_id: Number(listId) };
-    setItems((prev) => {
-      const updated = [...prev, newItem];
-      saveToDatabase(updated);
-      return updated;
-    });
+    setItems((prev) => { const updated = [...prev, newItem]; saveToDatabase(updated); return updated; });
     setInputValue(''); 
   }
 
-  // 🚀 UPDATED: Uses the compression engine for File Uploads
   async function handleImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    
-    const compressedBase64 = await compressImage(file);
-    
-    const newItem = { id: `item-${Date.now()}`, label: file.name, image: compressedBase64, tier: 'pool', tier_list_id: Number(listId) };
-    setItems((prev) => {
-      const updated = [...prev, newItem];
-      saveToDatabase(updated);
-      return updated;
-    });
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    const newItems = await Promise.all(Array.from(files).map(async (file, index) => {
+      const compressedBase64 = await compressImage(file);
+      return { id: `item-${Date.now()}-${index}`, label: file.name, image: compressedBase64, tier: 'pool', tier_list_id: Number(listId) };
+    }));
+    setItems((prev) => { const updated = [...prev, ...newItems]; saveToDatabase(updated); return updated; });
   }
 
   function handleDragStart(event: any) { setActiveId(event.active.id); }
@@ -320,7 +278,6 @@ export default function Editor() {
       const overIndex = prevItems.findIndex(item => item.id === overId);
       const activeItem = prevItems[activeIndex];
       const overItem = prevItems[overIndex];
-
       if (!activeItem) return prevItems;
       const isOverContainer = tiers.some(t => t.id === overId) || overId === 'pool';
 
@@ -352,7 +309,6 @@ export default function Editor() {
       });
       return;
     }
-
     const activeIndex = items.findIndex(item => item.id === active.id);
     const overIndex = items.findIndex(item => item.id === over.id);
 
@@ -367,118 +323,236 @@ export default function Editor() {
     }
   }
 
+  const handleDownloadPreview = () => {
+    if (!previewItem) return;
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext('2d');
+      ctx?.drawImage(img, 0, 0);
+      const pngDataUrl = canvas.toDataURL('image/png');
+      const link = document.createElement('a');
+      link.href = pngDataUrl;
+      const cleanName = editDescription.split('.')[0] || 'Downloaded_Image'; 
+      link.download = `${cleanName}.png`; 
+      link.click();
+    };
+    img.src = previewItem.image;
+  };
+
+  // 🚀 NEW: Saves the new Description and the new Cropped image to the DB!
+  const handleSavePreview = async () => {
+    if (!previewItem) return;
+    
+    let finalImage = previewItem.image;
+    
+    // If they cropped it, physically slice the image before saving
+    if (isCropping && croppedAreaPixels) {
+      finalImage = await getCroppedImg(previewItem.image, croppedAreaPixels);
+    }
+
+    const updatedItems = items.map(i => 
+      i.id === previewItem.id ? { ...i, label: editDescription.trim(), image: finalImage } : i
+    );
+    
+    setItems(updatedItems);
+    saveToDatabase(updatedItems);
+    
+    setPreviewItem(null);
+    setIsCropping(false);
+  };
+
   const activeItemData = items.find(i => i.id === activeId);
 
   return (
     <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragStart={handleDragStart} onDragOver={handleDragOver} onDragEnd={handleDragEnd}>
       <div className="hidden bg-red-500 bg-orange-500 bg-yellow-500 bg-green-500 bg-blue-500 bg-purple-500 bg-pink-500 bg-gray-400"></div>
 
-      <div className="min-h-screen bg-[#111111] text-white p-2 md:p-6 font-sans flex flex-col items-center">
+      <div className="min-h-screen bg-[#111111] text-white font-sans flex flex-col items-center">
         
-        <div className="w-full max-w-4xl mb-4 self-start md:self-auto md:w-full flex justify-between items-center">
-          <Link to="/" className="text-gray-400 hover:text-gray-200 font-semibold transition-colors flex items-center gap-2">
-            ← Back to Menu
-          </Link>
-          
-          <div className="flex items-center gap-4">
-            {savingCount > 0 && <span className="text-yellow-500 font-bold animate-pulse">Saving...</span>}
-            <button onClick={handleExportPNG} className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-1 px-4 rounded shadow-lg flex items-center gap-2">
-              📸 Export as PNG
-            </button>
-          </div>
-        </div>
-
-        <div ref={captureRef} className="w-full max-w-4xl p-2 bg-[#111111]">
-          
-          <div className="w-full mb-6 flex justify-center">
-            {isEditingTitle ? (
-              <div className="flex gap-2 w-full max-w-md">
-                <input autoFocus type="text" value={editTitle} onChange={(e) => setEditTitle(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSaveTitle()} className="flex-1 bg-gray-800 text-3xl font-bold text-center text-white border-b-2 border-blue-500 focus:outline-none py-1" />
-                <button onClick={handleSaveTitle} className="bg-green-600 hover:bg-green-500 px-4 rounded font-bold" data-html2canvas-ignore>Save</button>
-              </div>
-            ) : (
-              <h1 onClick={() => setIsEditingTitle(true)} className="text-3xl md:text-5xl font-bold text-gray-100 cursor-pointer hover:text-blue-400 transition-colors group flex items-center gap-3">
-                {listData.name}
-                <span className="text-xl opacity-0 group-hover:opacity-100 text-gray-500" data-html2canvas-ignore>✏️</span>
-              </h1>
-            )}
-          </div>
-          
-          <div className="w-full flex flex-col border-2 border-black bg-[#1a1a1a] mb-6">
-            {tiers.map((tier, index) => (
-              <div key={tier.id} className="flex border-b border-black min-h-[64px] md:min-h-[80px]">
-                
-                {editingTierId === tier.id ? (
-                  <div className="w-32 md:w-48 shrink-0 flex flex-col p-2 gap-2 bg-gray-800 border-r border-black z-10 justify-center" data-html2canvas-ignore>
-                    <input autoFocus value={editTierLabel} onChange={(e) => setEditTierLabel(e.target.value)} className="w-full text-black px-1 font-bold rounded" />
-                    <div className="flex flex-wrap gap-1 justify-center">
-                      {COLORS.map(c => (
-                        <button key={c} onClick={() => setEditTierColor(c)} className={`w-4 h-4 md:w-5 md:h-5 rounded-full cursor-pointer border-2 ${editTierColor === c ? 'border-white' : 'border-transparent'} ${c}`} />
-                      ))}
-                    </div>
-                    <div className="flex justify-between gap-1 w-full">
-                       <button onClick={() => moveTier(tier.id, -1)} disabled={index === 0} className="flex-1 bg-gray-700 hover:bg-gray-600 disabled:opacity-30 disabled:cursor-not-allowed text-white text-xs font-bold py-1 rounded">⬆️</button>
-                       <button onClick={() => moveTier(tier.id, 1)} disabled={index === tiers.length - 1} className="flex-1 bg-gray-700 hover:bg-gray-600 disabled:opacity-30 disabled:cursor-not-allowed text-white text-xs font-bold py-1 rounded">⬇️</button>
-                    </div>
-                    <div className="flex justify-between gap-1 w-full">
-                      <button onClick={() => saveTierEdit(tier)} className="flex-1 bg-green-600 hover:bg-green-500 text-white text-xs font-bold py-1 rounded">Save</button>
-                      <button onClick={() => handleDeleteTier(tier.id)} className="bg-red-600 hover:bg-red-500 text-white text-xs font-bold px-2 py-1 rounded" title="Delete Row">🗑️</button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className={`${tier.color} w-20 md:w-24 shrink-0 flex items-center justify-center text-xl md:text-2xl font-bold text-black border-r border-black relative group`}>
-                    <span className="break-words px-1 text-center leading-tight">{tier.label}</span>
-                    <button onClick={() => startEditing(tier)} className="absolute top-1 right-1 text-xs opacity-0 group-hover:opacity-100 hover:scale-125 transition-all bg-black/30 rounded p-1" title="Edit Tier" data-html2canvas-ignore>
-                      ⚙️
-                    </button>
-                  </div>
-                )}
-
-                <SortableZone id={tier.id} items={items.filter(item => item.tier === tier.id)} className="flex-1 p-1 flex flex-wrap content-start gap-1" onPreview={setPreviewItem} />
-              </div>
-            ))}
-          </div>
-        </div>
-        
-        <div className="w-full max-w-4xl px-2 md:px-0">
-          <div className="mb-6 bg-gray-800 p-4 rounded border border-gray-700 shadow-xl flex flex-col md:flex-row gap-4 justify-between items-center">
-            
-            <form onSubmit={handleAddText} className="flex gap-2 w-full md:w-auto">
-              <input type="text" value={inputValue} onChange={(e) => setInputValue(e.target.value)} placeholder="Type a label..." className="flex-1 md:w-64 bg-gray-900 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500" />
-              <button type="submit" className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 px-4 rounded shadow">Add Text</button>
-            </form>
-
-            <div className="flex gap-4 items-center w-full md:w-auto">
-              <button onClick={handleAddTier} className="bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded shadow flex-1 md:flex-none flex items-center justify-center gap-2" title="Add new tier row">
-                ➕ Add Row
+        {/* Editor Wrapper */}
+        <div className="w-full max-w-4xl p-2 md:p-6 pt-6">
+          <div className="w-full flex justify-between items-center mb-4">
+            <Link to="/" className="text-gray-400 hover:text-gray-200 font-semibold transition-colors flex items-center gap-2">
+              ← Back to Menu
+            </Link>
+            <div className="flex items-center gap-4">
+              {savingCount > 0 && <span className="text-yellow-500 font-bold animate-pulse">Saving...</span>}
+              <button onClick={handleExportPNG} className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-1 px-4 rounded shadow-lg flex items-center gap-2">
+                📸 Export as PNG
               </button>
-
-              <label className="bg-green-600 hover:bg-green-500 text-white font-bold py-2 px-6 rounded shadow cursor-pointer text-center flex-1 md:flex-none">
-                Upload Image
-                <input type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
-              </label>
             </div>
-
           </div>
 
-          <SortableZone id="pool" items={items.filter(item => item.tier === 'pool')} className="bg-[#1a1a1a] border-2 border-black min-h-[150px] p-2 flex flex-wrap content-start gap-1 shadow-xl" onPreview={setPreviewItem} />
+          <div ref={captureRef} className="w-full bg-[#111111]">
+            <div className="w-full mb-6 flex justify-center">
+              {isEditingTitle ? (
+                <div className="flex gap-2 w-full max-w-md">
+                  <input autoFocus type="text" value={editTitle} onChange={(e) => setEditTitle(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSaveTitle()} className="flex-1 bg-gray-800 text-3xl font-bold text-center text-white border-b-2 border-blue-500 focus:outline-none py-1" />
+                  <button onClick={handleSaveTitle} className="bg-green-600 hover:bg-green-500 px-4 rounded font-bold" data-html2canvas-ignore>Save</button>
+                </div>
+              ) : (
+                <h1 onClick={() => setIsEditingTitle(true)} className="text-3xl md:text-5xl font-bold text-gray-100 cursor-pointer hover:text-blue-400 transition-colors group flex items-center gap-3">
+                  {listData.name}
+                  <span className="text-xl opacity-0 group-hover:opacity-100 text-gray-500" data-html2canvas-ignore>✏️</span>
+                </h1>
+              )}
+            </div>
+            
+            <div className="w-full flex flex-col border-2 border-black bg-[#1a1a1a] mb-6 shadow-xl">
+              {tiers.map((tier, index) => (
+                <div key={tier.id} className="flex border-b border-black min-h-[64px] md:min-h-[80px]">
+                  
+                  {editingTierId === tier.id ? (
+                    <div className="w-32 md:w-48 shrink-0 flex flex-col p-2 gap-2 bg-gray-800 border-r border-black z-10 justify-center" data-html2canvas-ignore>
+                      <input autoFocus value={editTierLabel} onChange={(e) => setEditTierLabel(e.target.value)} className="w-full text-black px-1 font-bold rounded" />
+                      <div className="flex flex-wrap gap-1 justify-center">
+                        {COLORS.map(c => (
+                          <button key={c} onClick={() => setEditTierColor(c)} className={`w-4 h-4 md:w-5 md:h-5 rounded-full cursor-pointer border-2 ${editTierColor === c ? 'border-white' : 'border-transparent'} ${c}`} />
+                        ))}
+                      </div>
+                      <div className="flex justify-between gap-1 w-full">
+                         <button onClick={() => moveTier(tier.id, -1)} disabled={index === 0} className="flex-1 bg-gray-700 hover:bg-gray-600 disabled:opacity-30 disabled:cursor-not-allowed text-white text-xs font-bold py-1 rounded">⬆️</button>
+                         <button onClick={() => moveTier(tier.id, 1)} disabled={index === tiers.length - 1} className="flex-1 bg-gray-700 hover:bg-gray-600 disabled:opacity-30 disabled:cursor-not-allowed text-white text-xs font-bold py-1 rounded">⬇️</button>
+                      </div>
+                      <div className="flex justify-between gap-1 w-full">
+                        <button onClick={() => saveTierEdit(tier)} className="flex-1 bg-green-600 hover:bg-green-500 text-white text-xs font-bold py-1 rounded">Save</button>
+                        <button onClick={() => handleDeleteTier(tier.id)} className="bg-red-600 hover:bg-red-500 text-white text-xs font-bold px-2 py-1 rounded" title="Delete Row">🗑️</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className={`${tier.color} w-20 md:w-24 shrink-0 flex items-center justify-center text-xl md:text-2xl font-bold text-black border-r border-black relative group`}>
+                      <span className="break-words px-1 text-center leading-tight">{tier.label}</span>
+                      <button onClick={() => startEditing(tier)} className="absolute top-1 right-1 text-xs opacity-0 group-hover:opacity-100 hover:scale-125 transition-all bg-black/30 rounded p-1" title="Edit Tier" data-html2canvas-ignore>
+                        ⚙️
+                      </button>
+                    </div>
+                  )}
+
+                  {/* 🚀 FIX: Clicking an item opens the modal AND loads its existing description text! */}
+                  <SortableZone id={tier.id} items={items.filter(item => item.tier === tier.id)} className="flex-1 p-1 flex flex-wrap content-start gap-1" onPreview={(item) => { setPreviewItem(item); setEditDescription(item.label); setIsCropping(false); setZoom(1); }} />
+                </div>
+              ))}
+            </div>
+          </div>
+
           <TrashZone />
           
-          <div className="mt-8">
+          <div className="mt-8 mb-48 md:mb-56">
             <h3 className="text-xl font-bold mb-2 text-gray-300">Notes & Context</h3>
             <textarea value={listData.notes} onChange={handleNotesChange} onBlur={handleNotesBlur} placeholder="Add your notes here..." className="w-full bg-gray-800 border border-gray-700 rounded-lg p-4 text-white focus:outline-none focus:border-blue-500 min-h-[120px]" />
           </div>
         </div>
+
+        {/* STICKY DRAWER */}
+        <div className="sticky bottom-0 w-full max-w-4xl z-[60] bg-[#111111] border-t border-gray-700 md:border-t-2 md:border-gray-800 pb-8 md:pb-6 shadow-[0_-15px_30px_rgba(0,0,0,0.8)]">
+          <div className="w-full px-2 md:px-0 pt-4">
+            
+            <div className="mb-2 bg-gray-800 p-2 md:p-4 rounded border border-gray-700 shadow-xl flex flex-col md:flex-row gap-2 md:gap-4 justify-between items-center">
+              <form onSubmit={handleAddText} className="flex gap-2 w-full md:w-auto">
+                <input type="text" value={inputValue} onChange={(e) => setInputValue(e.target.value)} placeholder="Type a label..." className="flex-1 md:w-64 bg-gray-900 border border-gray-600 rounded px-3 py-1 md:py-2 text-white focus:outline-none focus:border-blue-500" />
+                <button type="submit" className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-1 px-4 rounded shadow">Add</button>
+              </form>
+
+              <div className="flex gap-2 w-full md:w-auto">
+                <button onClick={handleAddTier} className="bg-gray-700 hover:bg-gray-600 text-white font-bold py-1 px-4 rounded shadow flex-1 md:flex-none flex items-center justify-center" title="Add new tier row">
+                  ➕ Row
+                </button>
+                <label className="bg-green-600 hover:bg-green-500 text-white font-bold py-1 px-6 rounded shadow cursor-pointer text-center flex-1 md:flex-none">
+                  Upload Images
+                  <input type="file" accept="image/*" multiple className="hidden" onChange={handleImageUpload} />
+                </label>
+              </div>
+            </div>
+
+            <div className="bg-[#1a1a1a] border-2 border-black p-2 shadow-xl">
+              <h2 className="text-gray-400 font-bold text-sm mb-1 uppercase tracking-wide">Unranked Pool</h2>
+              <SortableZone id="pool" items={items.filter(item => item.tier === 'pool')} className="min-h-[100px] max-h-[30vh] overflow-y-auto flex flex-wrap content-start gap-1 pb-4" onPreview={(item) => { setPreviewItem(item); setEditDescription(item.label); setIsCropping(false); setZoom(1); }} />
+            </div>
+
+          </div>
+        </div>
       </div>
       
+      {/* 🚀 THE UPGRADED PREVIEW / EDIT / CROP MODAL */}
       {previewItem && (
-        <div className="fixed inset-0 z-[100] bg-black/90 flex flex-col items-center justify-center p-4" onClick={() => setPreviewItem(null)}>
-          <img src={previewItem.image} alt={previewItem.label} className="max-w-full max-h-[80vh] object-contain border-4 border-gray-700 rounded-lg shadow-2xl" onClick={(e) => e.stopPropagation()} />
+        <div className="fixed inset-0 z-[100] bg-black/95 flex flex-col items-center justify-center p-4">
+          
+          <div className="w-full max-w-2xl bg-gray-900 rounded-xl p-4 shadow-2xl border border-gray-700 flex flex-col items-center">
+            
+            {/* Conditional Rendering: Cropper Engine vs Standard Image */}
+            {isCropping && previewItem.image ? (
+              <div className="relative w-full h-[50vh] bg-black rounded-lg overflow-hidden mb-4 border-2 border-blue-500">
+                <Cropper
+                  image={previewItem.image}
+                  crop={crop}
+                  zoom={zoom}
+                  aspect={undefined} // Free aspect ratio for arbitrary slices!
+                  onCropChange={setCrop}
+                  onCropComplete={(_, croppedPixels: any) => setCroppedAreaPixels(croppedPixels)}
+                  onZoomChange={setZoom}
+                />
+              </div>
+            ) : (
+              <img src={previewItem.image} alt={editDescription} className="max-w-full max-h-[50vh] object-contain border-4 border-gray-700 rounded-lg shadow-2xl mb-4" />
+            )}
+
+            {/* Hidden Text Description Editor */}
+            <div className="w-full flex flex-col gap-2 mb-6">
+              <label className="text-gray-400 text-sm font-bold uppercase tracking-wide">Invisible Description / Label</label>
+              <input 
+                type="text" 
+                value={editDescription} 
+                onChange={(e) => setEditDescription(e.target.value)} 
+                placeholder="e.g. Ichiran Ramen - Shibuya"
+                className="w-full bg-gray-800 border border-gray-600 rounded px-4 py-2 text-white focus:outline-none focus:border-blue-500" 
+              />
+              <p className="text-xs text-gray-500">This text shows up if you hover over the image on a computer!</p>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex flex-wrap gap-2 w-full justify-center">
+              
+              {!isCropping && previewItem.image && (
+                <button onClick={() => setIsCropping(true)} className="bg-purple-600 hover:bg-purple-500 px-4 py-2 rounded font-bold text-white shadow-lg flex-1 md:flex-none">
+                  ✂️ Crop Image
+                </button>
+              )}
+
+              <button onClick={handleSavePreview} className="bg-green-600 hover:bg-green-500 px-6 py-2 rounded font-bold text-white shadow-lg flex-1 md:flex-none">
+                💾 Save Changes
+              </button>
+
+              <button onClick={() => setPreviewItem(null)} className="bg-gray-600 hover:bg-gray-500 px-6 py-2 rounded font-bold text-white shadow-lg flex-1 md:flex-none">
+                Cancel
+              </button>
+
+            </div>
+
+            {!isCropping && previewItem.image && (
+              <div className="mt-6 pt-4 border-t border-gray-800 w-full flex justify-center">
+                <button onClick={(e) => { e.stopPropagation(); handleDownloadPreview(); }} className="hidden md:block text-blue-400 hover:text-blue-300 font-bold underline">
+                  Download Original PNG
+                </button>
+                <p className="text-gray-500 text-xs md:hidden">Tip: Long-press the image to Save to Photos</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* TIER LIST EXPORT MODAL */}
+      {exportPreview && (
+        <div className="fixed inset-0 z-[100] bg-black/90 flex flex-col items-center justify-center p-4" onClick={() => { setExportPreview(null); URL.revokeObjectURL(exportPreview); }}>
+          <img src={exportPreview} alt="Exported Tier List" className="max-w-full max-h-[75vh] object-contain border-4 border-gray-700 rounded-lg shadow-2xl" onClick={(e) => e.stopPropagation()} />
+          <p className="text-gray-300 text-sm mt-4 md:hidden text-center font-bold">✅ Tier List Generated!<br/><span className="font-normal text-gray-400">Long-press the image above to Save to Photos</span></p>
           <div className="flex gap-4 mt-6">
-            <a href={previewItem.image} download={previewItem.label} onClick={(e) => e.stopPropagation()} className="bg-blue-600 hover:bg-blue-500 px-6 py-2 rounded font-bold text-white shadow-lg text-center">
-              📥 Download
+            <a href={exportPreview} download={`${listData.name}-TierList.png`} onClick={(e) => e.stopPropagation()} className="hidden md:block bg-blue-600 hover:bg-blue-500 px-6 py-2 rounded font-bold text-white shadow-lg text-center">
+              📥 Download PNG
             </a>
-            <button onClick={() => setPreviewItem(null)} className="bg-gray-600 hover:bg-gray-500 px-6 py-2 rounded font-bold text-white shadow-lg">
+            <button onClick={() => { setExportPreview(null); URL.revokeObjectURL(exportPreview); }} className="bg-gray-600 hover:bg-gray-500 px-6 py-2 rounded font-bold text-white shadow-lg">
               Close
             </button>
           </div>
