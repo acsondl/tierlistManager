@@ -4,7 +4,7 @@ import { DndContext, PointerSensor, useSensor, useSensors, TouchSensor, closestC
 import { SortableContext, rectSortingStrategy, useSortable, arrayMove } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
-// ⚠️ PUT YOUR TAILSCALE HTTPS URL HERE! (Make sure it ends in /api/lists)
+// ⚠️ PUT YOUR TAILSCALE HTTPS URL HERE! 
 const BACKEND_URL = "https://linux.tail2f8d37.ts.net:8444/api/lists";
 
 function SortableListCard({ list, onDelete }: { list: any, onDelete: any }) {
@@ -17,7 +17,6 @@ function SortableListCard({ list, onDelete }: { list: any, onDelete: any }) {
       style={style} 
       {...attributes} 
       {...listeners} 
-      // 🚀 FIX: Swapped touch-none for touch-manipulation to allow mobile scrolling
       className="bg-gray-800 p-6 rounded-xl border border-gray-700 hover:border-blue-500 shadow-lg relative cursor-grab active:cursor-grabbing touch-manipulation flex flex-col items-center group"
     >
       <button 
@@ -45,29 +44,41 @@ function SortableListCard({ list, onDelete }: { list: any, onDelete: any }) {
 export default function Home() {
   const [tierLists, setTierLists] = useState<any[]>([]);
   const [newListName, setNewListName] = useState('');
+  const [isSyncing, setIsSyncing] = useState(false);
 
-  // 🚀 FIX: Added the 250ms Touch delay to the Homepage
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    useSensor(TouchSensor, { 
-      activationConstraint: { 
-        delay: 250, 
-        tolerance: 5 
-      } 
-    }) 
+    useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 5 } }) 
   );
 
+  // 🚀 FIX: Instant Local Load + Background Sync
   useEffect(() => {
+    // 1. INSTANT LOAD from hard drive
+    const cached = localStorage.getItem('home_tierlists');
+    if (cached) {
+      setTierLists(JSON.parse(cached));
+    } else {
+      setIsSyncing(true); // Only show loading text if cache is completely empty
+    }
+
+    // 2. BACKGROUND SYNC with Taiwan
     fetch(BACKEND_URL)
       .then(response => response.json())
-      .then(data => { if (data) setTierLists(data); })
-      .catch(error => console.error("Error fetching tier lists:", error));
+      .then(data => { 
+        if (data) { 
+          setTierLists(data); 
+          localStorage.setItem('home_tierlists', JSON.stringify(data));
+        } 
+      })
+      .catch(error => console.error("Error fetching tier lists:", error))
+      .finally(() => setIsSyncing(false));
   }, []);
 
   const handleCreateList = (e: React.FormEvent) => {
     e.preventDefault();
     if (newListName.trim() === '') return;
-
+    
+    setIsSyncing(true);
     fetch(BACKEND_URL + "/new", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -75,19 +86,28 @@ export default function Home() {
     })
       .then(response => response.json())
       .then(newList => {
-        setTierLists([newList, ...tierLists]);
+        const updatedLists = [newList, ...tierLists];
+        setTierLists(updatedLists);
+        localStorage.setItem('home_tierlists', JSON.stringify(updatedLists));
         setNewListName(''); 
       })
-      .catch(error => console.error("Error creating list:", error));
+      .catch(error => console.error("Error creating list:", error))
+      .finally(() => setIsSyncing(false));
   };
 
   const handleDeleteList = (e: React.MouseEvent, id: number) => {
     e.preventDefault(); 
     if (!window.confirm("Are you sure you want to permanently delete this list?")) return;
 
+    // Optimistic UI Delete
+    const updatedLists = tierLists.filter(list => list.id !== id);
+    setTierLists(updatedLists);
+    localStorage.setItem('home_tierlists', JSON.stringify(updatedLists));
+
+    setIsSyncing(true);
     fetch(`${BACKEND_URL}?id=${id}`, { method: 'DELETE' })
-      .then(() => setTierLists(prev => prev.filter(list => list.id !== id)))
-      .catch(err => console.error("Error deleting list:", err));
+      .catch(err => console.error("Error deleting list:", err))
+      .finally(() => setIsSyncing(false));
   };
 
   const handleDragEnd = (event: any) => {
@@ -99,22 +119,31 @@ export default function Home() {
 
     const reorderedLists = arrayMove(tierLists, oldIndex, newIndex);
     const finalLists = reorderedLists.map((list, index) => ({ ...list, order_index: index }));
+    
+    // Optimistic UI Order Update
     setTierLists(finalLists);
+    localStorage.setItem('home_tierlists', JSON.stringify(finalLists));
 
+    setIsSyncing(true);
     fetch(BACKEND_URL + "/bulk", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(finalLists)
-    }).catch(err => console.error("Error saving list order:", err));
+    })
+      .catch(err => console.error("Error saving list order:", err))
+      .finally(() => setIsSyncing(false));
   };
 
   return (
     <div className="min-h-screen bg-gray-900 text-white p-8 flex flex-col items-center font-sans">
-      <h1 className="text-5xl font-bold mb-10 text-gray-100 mt-10">My Tier Lists</h1>
+      <div className="flex items-center gap-4 mt-10 mb-10">
+        <h1 className="text-5xl font-bold text-gray-100">My Tier Lists</h1>
+        {isSyncing && <span className="text-gray-400 text-sm font-bold animate-pulse mt-3">☁️ Syncing...</span>}
+      </div>
       
       <form onSubmit={handleCreateList} className="flex gap-3 mb-16 w-full max-w-md">
         <input type="text" value={newListName} onChange={(e) => setNewListName(e.target.value)} placeholder="New Tier List Name..." className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors shadow-lg" />
-        <button type="submit" className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-6 rounded-lg shadow-lg transition-colors">Create</button>
+        <button type="submit" disabled={isSyncing} className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold py-3 px-6 rounded-lg shadow-lg transition-colors">Create</button>
       </form>
 
       <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>

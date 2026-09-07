@@ -4,7 +4,6 @@ import { DndContext, pointerWithin, DragOverlay, PointerSensor, useSensor, useSe
 import { SortableContext, rectSortingStrategy, useSortable, arrayMove } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { toBlob } from 'html-to-image'; 
-import Cropper from 'react-easy-crop'; // 🚀 NEW: The mobile-friendly image slicer!
 import '../index.css';
 
 // ⚠️ PUT YOUR TAILSCALE HTTPS URL HERE! 
@@ -15,47 +14,37 @@ const LISTS_API = `${API_BASE}/lists`;
 
 const COLORS = ["bg-red-500", "bg-orange-500", "bg-yellow-500", "bg-green-500", "bg-blue-500", "bg-purple-500", "bg-pink-500", "bg-gray-400"];
 
+// 🚀 FIX: Set to 720px for good downloads, but 0.5 quality for tiny DB payload
+const recompressBase64 = (base64Str: string): Promise<string> => {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      const MAX_SIZE = 720; 
+      let width = img.width;
+      let height = img.height;
+      if (width > height) { if (width > MAX_SIZE) { height *= MAX_SIZE / width; width = MAX_SIZE; } } 
+      else { if (height > MAX_SIZE) { width *= MAX_SIZE / height; height = MAX_SIZE; } }
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx?.drawImage(img, 0, 0, width, height);
+      resolve(canvas.toDataURL('image/webp', 0.5)); 
+    };
+    img.src = base64Str;
+  });
+};
+
 const compressImage = (file: File): Promise<string> => {
   return new Promise((resolve) => {
     const reader = new FileReader();
     reader.onload = (event) => {
-      const img = new Image();
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        const MAX_SIZE = 512; 
-        let width = img.width;
-        let height = img.height;
-        if (width > height) { if (width > MAX_SIZE) { height *= MAX_SIZE / width; width = MAX_SIZE; } } 
-        else { if (height > MAX_SIZE) { width *= MAX_SIZE / height; height = MAX_SIZE; } }
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        ctx?.drawImage(img, 0, 0, width, height);
-        resolve(canvas.toDataURL('image/webp', 0.8));
-      };
-      img.src = event.target?.result as string;
+      if (event.target?.result) {
+        recompressBase64(event.target.result as string).then(resolve);
+      }
     };
     reader.readAsDataURL(file);
   });
-};
-
-// 🚀 NEW: Utility to physically slice the image after you select the crop area
-const getCroppedImg = async (imageSrc: string, pixelCrop: any): Promise<string> => {
-  const image = new Image();
-  image.src = imageSrc;
-  await new Promise(res => image.onload = res);
-
-  const canvas = document.createElement('canvas');
-  canvas.width = pixelCrop.width;
-  canvas.height = pixelCrop.height;
-  const ctx = canvas.getContext('2d');
-
-  ctx?.drawImage(
-    image,
-    pixelCrop.x, pixelCrop.y, pixelCrop.width, pixelCrop.height,
-    0, 0, pixelCrop.width, pixelCrop.height
-  );
-  return canvas.toDataURL('image/webp', 0.9);
 };
 
 function SortableItem({ id, label, image, onPreview }: { id: string, label: string, image?: string, onPreview?: () => void }) {
@@ -69,10 +58,10 @@ function SortableItem({ id, label, image, onPreview }: { id: string, label: stri
       {...listeners} 
       {...attributes} 
       onDoubleClick={onPreview}
-      title={label} // 🚀 FIX: This creates the "invisible text" tooltip on hover!
+      title={label} 
       className="w-16 h-16 md:w-20 md:h-20 touch-manipulation bg-gray-700 flex items-center justify-center text-center font-bold text-xs md:text-sm shadow-sm cursor-grab active:cursor-grabbing hover:opacity-80 z-50 relative overflow-hidden shrink-0"
     >
-      {image ? <img src={image} alt={label} className="w-full h-full object-cover pointer-events-none" /> : <span className="p-1 break-words">{label}</span>}
+      {image ? <img src={image} alt={label} loading="lazy" className="w-full h-full object-cover pointer-events-none" /> : <span className="p-1 break-words">{label}</span>}
     </div>
   );
 }
@@ -113,15 +102,12 @@ export default function Editor() {
   const [editingTierId, setEditingTierId] = useState<string | null>(null);
   const [editTierLabel, setEditTierLabel] = useState("");
   const [editTierColor, setEditTierColor] = useState("");
-  const [savingCount, setSavingCount] = useState(0);
+  
+  const [syncingCount, setSyncingCount] = useState(0);
+  const [isOptimizing, setIsOptimizing] = useState(false);
 
-  // 🚀 NEW: State for Preview, Description Editing, and Cropping
   const [previewItem, setPreviewItem] = useState<any | null>(null);
   const [editDescription, setEditDescription] = useState("");
-  const [isCropping, setIsCropping] = useState(false);
-  const [crop, setCrop] = useState({ x: 0, y: 0 });
-  const [zoom, setZoom] = useState(1);
-  const [croppedAreaPixels, setCroppedAreaPixels] = useState(null);
 
   const [exportPreview, setExportPreview] = useState<string | null>(null);
   const captureRef = useRef<HTMLDivElement>(null);
@@ -132,25 +118,57 @@ export default function Editor() {
   );
 
   useEffect(() => {
-    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (savingCount > 0) { e.preventDefault(); e.returnValue = "Your work is still saving."; }
-    };
-    window.addEventListener("beforeunload", handleBeforeUnload);
-    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-  }, [savingCount]);
-
-  useEffect(() => {
     if (!listId) return;
+
+    const cachedList = localStorage.getItem(`list_${listId}`);
+    const cachedItems = localStorage.getItem(`items_${listId}`);
+    const cachedTiers = localStorage.getItem(`tiers_${listId}`);
+
+    if (cachedList) { const data = JSON.parse(cachedList); setListData(data); setEditTitle(data.name); }
+    if (cachedItems) setItems(JSON.parse(cachedItems));
+    if (cachedTiers) setTiers(JSON.parse(cachedTiers));
+
     fetch(`${LISTS_API}/single?id=${listId}`).then(res => res.json()).then(data => {
-      if (data) { setListData(data); setEditTitle(data.name); }
+      if (data) { setListData(data); setEditTitle(data.name); localStorage.setItem(`list_${listId}`, JSON.stringify(data)); }
     });
-    fetch(`${ITEMS_API}?list_id=${listId}`).then(res => res.json()).then(data => setItems(data || []));
-    fetch(`${TIERS_API}?list_id=${listId}`).then(res => res.json()).then(data => setTiers(data || []));
+    fetch(`${ITEMS_API}?list_id=${listId}`).then(res => res.json()).then(data => {
+      if (data) { setItems(data); localStorage.setItem(`items_${listId}`, JSON.stringify(data)); }
+    });
+    fetch(`${TIERS_API}?list_id=${listId}`).then(res => res.json()).then(data => {
+      if (data) { setTiers(data); localStorage.setItem(`tiers_${listId}`, JSON.stringify(data)); }
+    });
   }, [listId]);
+
+  // 🚀 FIX: The Legacy Purge. Scans the DB for old uncompressed images and fixes them permanently.
+  const handleOptimizeDatabase = async () => {
+    if (!window.confirm("This will scan and compress all massive legacy images in this tier list to permanently fix lag. Continue?")) return;
+    
+    setIsOptimizing(true);
+    try {
+      const optimizedItems = await Promise.all(items.map(async (item) => {
+        // If string is longer than ~150KB, it's a legacy uncompressed image
+        if (item.image && item.image.length > 200000) {
+          const fixedBase64 = await recompressBase64(item.image);
+          return { ...item, image: fixedBase64 };
+        }
+        return item;
+      }));
+
+      setItems(optimizedItems);
+      localStorage.setItem(`items_${listId}`, JSON.stringify(optimizedItems));
+      
+      await fetch(ITEMS_API + "/bulk", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(optimizedItems) });
+      alert("✅ Database Optimized! All drag-and-drop lag should now be completely gone.");
+    } catch (err) {
+      alert("Optimization failed. Check network connection.");
+    } finally {
+      setIsOptimizing(false);
+    }
+  };
 
   const handleExportPNG = async () => {
     if (!captureRef.current) return;
-    setSavingCount(prev => prev + 1); 
+    setSyncingCount(prev => prev + 1); 
     try {
       const blob = await toBlob(captureRef.current, {
         backgroundColor: '#111111', pixelRatio: 2, 
@@ -162,12 +180,14 @@ export default function Editor() {
       if (!blob) throw new Error("Failed to generate blob.");
       const url = URL.createObjectURL(blob);
       setExportPreview(url); 
-    } catch (err) { alert("Failed to export the image."); } finally { setSavingCount(prev => prev - 1); }
+    } catch (err) { alert("Failed to export the image."); } finally { setSyncingCount(prev => prev - 1); }
   };
 
   const saveListMetadata = (updatedData: any) => {
-    setSavingCount(prev => prev + 1);
-    fetch(LISTS_API + "/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(updatedData) }).finally(() => setSavingCount(prev => prev - 1));
+    localStorage.setItem(`list_${listId}`, JSON.stringify(updatedData));
+    setSyncingCount(prev => prev + 1);
+    fetch(LISTS_API + "/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(updatedData) })
+      .finally(() => setSyncingCount(prev => prev - 1));
   };
 
   const handleSaveTitle = () => {
@@ -181,26 +201,49 @@ export default function Editor() {
   const handleNotesBlur = () => saveListMetadata(listData);
 
   const saveToDatabase = (newItems: any[]) => {
-    setSavingCount(prev => prev + 1); 
-    fetch(ITEMS_API + "/bulk", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(newItems) }).catch(err => console.error(err)).finally(() => setSavingCount(prev => prev - 1)); 
+    localStorage.setItem(`items_${listId}`, JSON.stringify(newItems));
+    setSyncingCount(prev => prev + 1); 
+    fetch(ITEMS_API + "/bulk", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(newItems) })
+      .catch(err => console.error(err))
+      .finally(() => setSyncingCount(prev => prev - 1)); 
+  };
+
+  const saveTiersToDatabase = (updatedTiers: any[]) => {
+    localStorage.setItem(`tiers_${listId}`, JSON.stringify(updatedTiers));
+    setSyncingCount(prev => prev + 1);
+    fetch(TIERS_API + "/bulk", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(updatedTiers) })
+      .finally(() => setSyncingCount(prev => prev - 1));
   };
 
   const handleAddTier = () => {
     const newTier = { id: `tier-${listId}-${Date.now()}`, label: "NEW", color: "bg-gray-400", tier_list_id: Number(listId) };
-    setSavingCount(prev => prev + 1);
+    setSyncingCount(prev => prev + 1);
     fetch(TIERS_API + "/new", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(newTier) })
       .then(res => res.json())
-      .then(savedTier => setTiers(prev => [...prev, savedTier]))
-      .finally(() => setSavingCount(prev => prev - 1));
+      .then(savedTier => {
+        const updated = [...tiers, savedTier];
+        setTiers(updated);
+        localStorage.setItem(`tiers_${listId}`, JSON.stringify(updated));
+      })
+      .finally(() => setSyncingCount(prev => prev - 1));
   };
 
   const handleDeleteTier = (tierId: string) => {
     if (!window.confirm("Delete this tier? Any items inside it will be moved to the Unranked Pool.")) return;
-    setItems(prev => prev.map(item => item.tier === tierId ? { ...item, tier: 'pool' } : item));
-    setTiers(prev => prev.filter(t => t.id !== tierId));
+    const updatedItems = items.map(item => item.tier === tierId ? { ...item, tier: 'pool' } : item);
+    const updatedTiers = tiers.filter(t => t.id !== tierId);
+    
+    setItems(updatedItems);
+    setTiers(updatedTiers);
     setEditingTierId(null);
-    setSavingCount(prev => prev + 1);
-    fetch(`${TIERS_API}?id=${tierId}`, { method: 'DELETE' }).finally(() => setSavingCount(prev => prev - 1));
+    
+    localStorage.setItem(`items_${listId}`, JSON.stringify(updatedItems));
+    localStorage.setItem(`tiers_${listId}`, JSON.stringify(updatedTiers));
+
+    setSyncingCount(prev => prev + 1);
+    fetch(`${TIERS_API}?id=${tierId}`, { method: 'DELETE' })
+      .then(() => saveToDatabase(updatedItems))
+      .finally(() => setSyncingCount(prev => prev - 1));
   };
 
   const moveTier = (tierId: string, direction: number) => {
@@ -214,18 +257,20 @@ export default function Editor() {
     newTiers[newIndex] = temp;
     const updatedTiers = newTiers.map((t, i) => ({ ...t, order_index: i }));
     setTiers(updatedTiers); 
-    setSavingCount(prev => prev + 1);
-    fetch(TIERS_API + "/bulk", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(updatedTiers) }).finally(() => setSavingCount(prev => prev - 1));
+    saveTiersToDatabase(updatedTiers);
   };
 
   const startEditing = (tier: any) => { setEditingTierId(tier.id); setEditTierLabel(tier.label); setEditTierColor(tier.color); };
 
   const saveTierEdit = (tier: any) => {
     const updatedTier = { ...tier, label: editTierLabel.trim(), color: editTierColor };
-    setTiers(prev => prev.map(t => t.id === tier.id ? updatedTier : t));
+    const updatedTiers = tiers.map(t => t.id === tier.id ? updatedTier : t);
+    setTiers(updatedTiers);
     setEditingTierId(null);
-    setSavingCount(prev => prev + 1);
-    fetch(TIERS_API + "/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(updatedTier) }).finally(() => setSavingCount(prev => prev - 1));
+    localStorage.setItem(`tiers_${listId}`, JSON.stringify(updatedTiers));
+    setSyncingCount(prev => prev + 1);
+    fetch(TIERS_API + "/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(updatedTier) })
+      .finally(() => setSyncingCount(prev => prev - 1));
   };
 
   useEffect(() => {
@@ -304,6 +349,7 @@ export default function Editor() {
     if (over.id === 'trash') {
       setItems((prev) => {
         const updated = prev.filter(item => item.id !== active.id);
+        localStorage.setItem(`items_${listId}`, JSON.stringify(updated));
         fetch(`${ITEMS_API}?id=${active.id}`, { method: 'DELETE' }).catch(err => console.error(err));
         return updated;
       });
@@ -342,26 +388,12 @@ export default function Editor() {
     img.src = previewItem.image;
   };
 
-  // 🚀 NEW: Saves the new Description and the new Cropped image to the DB!
-  const handleSavePreview = async () => {
+  const handleSavePreview = () => {
     if (!previewItem) return;
-    
-    let finalImage = previewItem.image;
-    
-    // If they cropped it, physically slice the image before saving
-    if (isCropping && croppedAreaPixels) {
-      finalImage = await getCroppedImg(previewItem.image, croppedAreaPixels);
-    }
-
-    const updatedItems = items.map(i => 
-      i.id === previewItem.id ? { ...i, label: editDescription.trim(), image: finalImage } : i
-    );
-    
+    const updatedItems = items.map(i => i.id === previewItem.id ? { ...i, label: editDescription.trim() } : i);
     setItems(updatedItems);
     saveToDatabase(updatedItems);
-    
     setPreviewItem(null);
-    setIsCropping(false);
   };
 
   const activeItemData = items.find(i => i.id === activeId);
@@ -372,16 +404,26 @@ export default function Editor() {
 
       <div className="min-h-screen bg-[#111111] text-white font-sans flex flex-col items-center">
         
-        {/* Editor Wrapper */}
         <div className="w-full max-w-4xl p-2 md:p-6 pt-6">
-          <div className="w-full flex justify-between items-center mb-4">
+          <div className="w-full flex justify-between items-center mb-4 flex-wrap gap-2">
             <Link to="/" className="text-gray-400 hover:text-gray-200 font-semibold transition-colors flex items-center gap-2">
               ← Back to Menu
             </Link>
-            <div className="flex items-center gap-4">
-              {savingCount > 0 && <span className="text-yellow-500 font-bold animate-pulse">Saving...</span>}
-              <button onClick={handleExportPNG} className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-1 px-4 rounded shadow-lg flex items-center gap-2">
-                📸 Export as PNG
+            
+            <div className="flex items-center gap-2 md:gap-4">
+              {syncingCount > 0 && <span className="text-gray-400 text-xs md:text-sm font-bold animate-pulse">☁️ Syncing...</span>}
+              
+              {/* 🚀 NEW: The Legacy Purge Button */}
+              <button 
+                onClick={handleOptimizeDatabase} 
+                disabled={isOptimizing}
+                className="bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white font-bold py-1 px-3 md:px-4 rounded shadow-lg text-xs md:text-sm"
+              >
+                {isOptimizing ? "Optimizing..." : "🚀 Optimize DB"}
+              </button>
+              
+              <button onClick={handleExportPNG} className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-1 px-3 md:px-4 rounded shadow-lg text-xs md:text-sm flex items-center gap-2">
+                📸 Export PNG
               </button>
             </div>
           </div>
@@ -431,8 +473,7 @@ export default function Editor() {
                     </div>
                   )}
 
-                  {/* 🚀 FIX: Clicking an item opens the modal AND loads its existing description text! */}
-                  <SortableZone id={tier.id} items={items.filter(item => item.tier === tier.id)} className="flex-1 p-1 flex flex-wrap content-start gap-1" onPreview={(item) => { setPreviewItem(item); setEditDescription(item.label); setIsCropping(false); setZoom(1); }} />
+                  <SortableZone id={tier.id} items={items.filter(item => item.tier === tier.id)} className="flex-1 p-1 flex flex-wrap content-start gap-1" onPreview={(item) => { setPreviewItem(item); setEditDescription(item.label); }} />
                 </div>
               ))}
             </div>
@@ -446,7 +487,6 @@ export default function Editor() {
           </div>
         </div>
 
-        {/* STICKY DRAWER */}
         <div className="sticky bottom-0 w-full max-w-4xl z-[60] bg-[#111111] border-t border-gray-700 md:border-t-2 md:border-gray-800 pb-8 md:pb-6 shadow-[0_-15px_30px_rgba(0,0,0,0.8)]">
           <div className="w-full px-2 md:px-0 pt-4">
             
@@ -469,92 +509,45 @@ export default function Editor() {
 
             <div className="bg-[#1a1a1a] border-2 border-black p-2 shadow-xl">
               <h2 className="text-gray-400 font-bold text-sm mb-1 uppercase tracking-wide">Unranked Pool</h2>
-              <SortableZone id="pool" items={items.filter(item => item.tier === 'pool')} className="min-h-[100px] max-h-[30vh] overflow-y-auto flex flex-wrap content-start gap-1 pb-4" onPreview={(item) => { setPreviewItem(item); setEditDescription(item.label); setIsCropping(false); setZoom(1); }} />
+              <SortableZone id="pool" items={items.filter(item => item.tier === 'pool')} className="min-h-[100px] max-h-[30vh] overflow-y-auto flex flex-wrap content-start gap-1 pb-4" onPreview={(item) => { setPreviewItem(item); setEditDescription(item.label); }} />
             </div>
 
           </div>
         </div>
       </div>
       
-      {/* 🚀 THE UPGRADED PREVIEW / EDIT / CROP MODAL */}
       {previewItem && (
         <div className="fixed inset-0 z-[100] bg-black/95 flex flex-col items-center justify-center p-4">
-          
           <div className="w-full max-w-2xl bg-gray-900 rounded-xl p-4 shadow-2xl border border-gray-700 flex flex-col items-center">
             
-            {/* Conditional Rendering: Cropper Engine vs Standard Image */}
-            {isCropping && previewItem.image ? (
-              <div className="relative w-full h-[50vh] bg-black rounded-lg overflow-hidden mb-4 border-2 border-blue-500">
-                <Cropper
-                  image={previewItem.image}
-                  crop={crop}
-                  zoom={zoom}
-                  aspect={undefined} // Free aspect ratio for arbitrary slices!
-                  onCropChange={setCrop}
-                  onCropComplete={(_, croppedPixels: any) => setCroppedAreaPixels(croppedPixels)}
-                  onZoomChange={setZoom}
-                />
-              </div>
-            ) : (
-              <img src={previewItem.image} alt={editDescription} className="max-w-full max-h-[50vh] object-contain border-4 border-gray-700 rounded-lg shadow-2xl mb-4" />
-            )}
+            <img src={previewItem.image} alt={editDescription} className="max-w-full max-h-[50vh] object-contain border-4 border-gray-700 rounded-lg shadow-2xl mb-4" />
 
-            {/* Hidden Text Description Editor */}
             <div className="w-full flex flex-col gap-2 mb-6">
               <label className="text-gray-400 text-sm font-bold uppercase tracking-wide">Invisible Description / Label</label>
-              <input 
-                type="text" 
-                value={editDescription} 
-                onChange={(e) => setEditDescription(e.target.value)} 
-                placeholder="e.g. Ichiran Ramen - Shibuya"
-                className="w-full bg-gray-800 border border-gray-600 rounded px-4 py-2 text-white focus:outline-none focus:border-blue-500" 
-              />
-              <p className="text-xs text-gray-500">This text shows up if you hover over the image on a computer!</p>
+              <input type="text" value={editDescription} onChange={(e) => setEditDescription(e.target.value)} placeholder="e.g. Ichiran Ramen - Shibuya" className="w-full bg-gray-800 border border-gray-600 rounded px-4 py-2 text-white focus:outline-none focus:border-blue-500" />
+              <p className="text-xs text-gray-500">Hover over the image on a computer to see this text!</p>
             </div>
 
-            {/* Action Buttons */}
             <div className="flex flex-wrap gap-2 w-full justify-center">
-              
-              {!isCropping && previewItem.image && (
-                <button onClick={() => setIsCropping(true)} className="bg-purple-600 hover:bg-purple-500 px-4 py-2 rounded font-bold text-white shadow-lg flex-1 md:flex-none">
-                  ✂️ Crop Image
-                </button>
-              )}
-
-              <button onClick={handleSavePreview} className="bg-green-600 hover:bg-green-500 px-6 py-2 rounded font-bold text-white shadow-lg flex-1 md:flex-none">
-                💾 Save Changes
-              </button>
-
-              <button onClick={() => setPreviewItem(null)} className="bg-gray-600 hover:bg-gray-500 px-6 py-2 rounded font-bold text-white shadow-lg flex-1 md:flex-none">
-                Cancel
-              </button>
-
+              <button onClick={handleSavePreview} className="bg-green-600 hover:bg-green-500 px-6 py-2 rounded font-bold text-white shadow-lg flex-1 md:flex-none">💾 Save Changes</button>
+              <button onClick={() => setPreviewItem(null)} className="bg-gray-600 hover:bg-gray-500 px-6 py-2 rounded font-bold text-white shadow-lg flex-1 md:flex-none">Cancel</button>
             </div>
 
-            {!isCropping && previewItem.image && (
-              <div className="mt-6 pt-4 border-t border-gray-800 w-full flex justify-center">
-                <button onClick={(e) => { e.stopPropagation(); handleDownloadPreview(); }} className="hidden md:block text-blue-400 hover:text-blue-300 font-bold underline">
-                  Download Original PNG
-                </button>
-                <p className="text-gray-500 text-xs md:hidden">Tip: Long-press the image to Save to Photos</p>
-              </div>
-            )}
+            <div className="mt-6 pt-4 border-t border-gray-800 w-full flex justify-center">
+              <button onClick={(e) => { e.stopPropagation(); handleDownloadPreview(); }} className="hidden md:block text-blue-400 hover:text-blue-300 font-bold underline">Download Original PNG</button>
+              <p className="text-gray-500 text-xs md:hidden">Tip: Long-press the image to Save to Photos</p>
+            </div>
           </div>
         </div>
       )}
 
-      {/* TIER LIST EXPORT MODAL */}
       {exportPreview && (
         <div className="fixed inset-0 z-[100] bg-black/90 flex flex-col items-center justify-center p-4" onClick={() => { setExportPreview(null); URL.revokeObjectURL(exportPreview); }}>
           <img src={exportPreview} alt="Exported Tier List" className="max-w-full max-h-[75vh] object-contain border-4 border-gray-700 rounded-lg shadow-2xl" onClick={(e) => e.stopPropagation()} />
           <p className="text-gray-300 text-sm mt-4 md:hidden text-center font-bold">✅ Tier List Generated!<br/><span className="font-normal text-gray-400">Long-press the image above to Save to Photos</span></p>
           <div className="flex gap-4 mt-6">
-            <a href={exportPreview} download={`${listData.name}-TierList.png`} onClick={(e) => e.stopPropagation()} className="hidden md:block bg-blue-600 hover:bg-blue-500 px-6 py-2 rounded font-bold text-white shadow-lg text-center">
-              📥 Download PNG
-            </a>
-            <button onClick={() => { setExportPreview(null); URL.revokeObjectURL(exportPreview); }} className="bg-gray-600 hover:bg-gray-500 px-6 py-2 rounded font-bold text-white shadow-lg">
-              Close
-            </button>
+            <a href={exportPreview} download={`${listData.name}-TierList.png`} onClick={(e) => e.stopPropagation()} className="hidden md:block bg-blue-600 hover:bg-blue-500 px-6 py-2 rounded font-bold text-white shadow-lg text-center">📥 Download PNG</a>
+            <button onClick={() => { setExportPreview(null); URL.revokeObjectURL(exportPreview); }} className="bg-gray-600 hover:bg-gray-500 px-6 py-2 rounded font-bold text-white shadow-lg">Close</button>
           </div>
         </div>
       )}
